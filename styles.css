@@ -526,3 +526,18 @@ textarea { resize: vertical; }
 
 .fila-form .acciones { align-items: center; }
 label.btn { display: inline-flex; align-items: center; justify-content: center; flex-direction: row; }
+
+/* ¿Dónde hay? e inventario de todos los almacenes */
+.dh-cab { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; flex-wrap: wrap; margin: 4px 0 8px; }
+.dh-cab b:first-child { font-size: 1.1rem; }
+.tabla tr.fila-mia td { background: var(--primario-suave); }
+.tabla .col-mia { background: var(--primario-suave); }
+.txt-suave { color: var(--suave); }
+.dh-form { margin-top: 10px; border-color: var(--primario); }
+.vis-otras { color: var(--ok); font-weight: 600; }
+.tabla-red td, .tabla-red th { white-space: nowrap; }
+.tabla-red td:first-child { white-space: normal; min-width: 180px; }
+#cj-donde { flex: none; }
+@media (max-width: 640px) { #cj-donde { width: 100%; } }
+.dh-acc { white-space: nowrap; text-align: right; }
+.dh-acc .btn + .btn { margin-left: 6px; }

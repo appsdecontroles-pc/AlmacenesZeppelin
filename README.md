@@ -192,6 +192,17 @@ En **Mi cuenta > Cambiar apariencia** (administrador general). Se aplica en todo
 
 Al actualizar el servidor a esta versión hay que ejecutar **instalar** otra vez (agrega las columnas de imagen y descripción a Productos).
 
+## Inventario de todos los almacenes y "¿Dónde hay?"
+
+- **Inventario > Todos los almacenes:** una columna por almacén y el total de cada producto. Lo ven todos los usuarios (sin costos para el cajero) y se exporta a CSV.
+- **¿Dónde hay?** (en Inventario y en la Caja): busca un producto y muestra cuánto hay en cada almacén, con dirección y teléfono.
+  - **Datos para el cliente:** imprime un papelito con la sucursal, dirección, teléfono y precio, para mandarlo a la otra sucursal.
+  - **Pedir traspaso** (cajero y administrador de sucursal): crea una solicitud para que el otro almacén mande el producto a tu sucursal.
+- **En la caja:** los productos que no hay en tu sucursal dicen "hay en otra", y el recuadro del producto muestra "En otros: …".
+- **Las existencias de otros almacenes** son las de la última sincronización (cada 15 minutos o al tocar "En línea").
+
+**Traspasos entre sucursales:** la solicitud llega a la sección **Pedidos** del almacén que surte, sea la bodega o una sucursal. Su administrador la acepta, la surte (sale de su inventario) y la sucursal que pidió confirma la entrega (entra a su inventario).
+
 ## Cómo funciona sin internet
 
 - Al entrar y cada 15 minutos, la app descarga catálogo, precios y existencias, y los guarda en el equipo.
@@ -205,7 +216,7 @@ Al actualizar el servidor a esta versión hay que ejecutar **instalar** otra vez
 | Rol | Puede |
 |---|---|
 | Administrador general | Todo, en todos los almacenes |
-| Administrador de sucursal | Ver su sucursal, registrar movimientos, crear cajeros y personal de inventarios |
+| Administrador de sucursal | Ver su sucursal, registrar movimientos, crear cajeros y personal de inventarios, pedir y surtir traspasos con otras sucursales |
 | Control de inventarios | Editar catálogo y registrar movimientos en su almacén |
-| Cajero | Consultar productos, precios y existencias de su sucursal (sin costos) |
+| Cajero | Vender, consultar productos y existencias (sin costos), ver dónde hay un producto y pedir traspasos |
 | Cliente | Portal: hacer pedidos, ver sus pedidos y su estado de cuenta |

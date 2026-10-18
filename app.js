@@ -5,7 +5,7 @@
 
 const CFG = Object.assign({ NOMBRE: 'Control de Inventario', SYNC_MINUTOS: 15, API_URL: '' }, window.APP_CONFIG || {});
 CFG.NOMBRE_ORIGINAL = CFG.NOMBRE;
-const VERSION_APP = '5.3.0';
+const VERSION_APP = '5.4.0';
 
 const ROL_TXT = {
   ADMIN_GENERAL: 'Administrador general',
@@ -278,6 +278,7 @@ async function cargarSesion(ses) {
   S.alertas = esGeneral() ? (await DB.get('alertas')) || null : null;
   S.clientes = (await DB.get('clientes')) || [];
   S.precios = (await DB.get('precios')) || [];
+  S.otras = (await DB.get('otras')) || null;
   S.cliente = rol() === 'CLIENTE' ? (await DB.get('cliente')) || null : null;
   S.avisos = (await DB.get('avisos')) || null;
   indexar();
@@ -416,6 +417,8 @@ async function sincronizar(manual = false) {
     }
     S.existencias = d.existencias || [];
     await DB.set('existencias', S.existencias);
+    S.otras = d.otras || null;
+    await DB.set('otras', S.otras);
     S.alertas = d.alertas || null;
     await DB.set('alertas', S.alertas);
     S.avisos = d.avisos || null;
@@ -768,7 +771,8 @@ function dlgProducto(p, codigoBarras = '') {
         <label>Stock mínimo<input name="stock_minimo" type="number" step="any" min="0" value="${val(p.stock_minimo)}" ${ro}></label>
         <label class="chk"><input type="checkbox" name="activo" ${esActivo(p.activo) ? 'checked' : ''} ${ro}> Activo</label>
       </div>
-      ${!nuevo && alms.length ? `<div class="existencias"><b>Existencias</b>${alms.map(a => `<span>${esc(a.nombre)}: <b>${numero(ex[a.id + '|' + p.id] || 0)}</b> ${esc(p.unidad || '')}</span>`).join('')}</div>` : ''}
+      ${!nuevo && alms.length ? (() => { const red = mapaRed(); const ver = almacenesActivos().filter(a => alms.some(x => x.id === a.id) || (red[a.id + '|' + p.id] || 0) > 0);
+        return `<div class="existencias"><b>Existencias</b>${ver.map(a => `<span>${esc(a.nombre)}: <b>${numero(red[a.id + '|' + p.id] || 0)}</b> ${esc(p.unidad || '')}</span>`).join('')}</div>`; })() : ''}
       <p class="msg" id="fp-msg"></p>
       ${puede ? `<div class="pie">${!nuevo && esGeneral() ? '<button type="button" class="btn peligro izq" id="fp-del">Eliminar</button>' : ''}<button type="button" class="btn sec" data-cerrar>Cancelar</button><button class="btn" type="submit">Guardar</button></div>` : ''}
     </form>`);
@@ -1140,12 +1144,15 @@ function dlgImportar() {
 /* ---- Inventario ---- */
 function vInventario(el) {
   const alms = almacenesVisibles();
-  if (!F.ialm || !alms.some(a => a.id === F.ialm)) F.ialm = alms[0] ? alms[0].id : '';
+  const todos = almacenesActivos();
+  const hayRed = todos.length > 1;
+  if (!F.ialm || !(alms.some(a => a.id === F.ialm) || (F.ialm === '*' && hayRed))) F.ialm = alms[0] ? alms[0].id : '';
   el.innerHTML = `
-    <div class="titulo"><h2>Inventario</h2><div class="acciones"><button type="button" class="btn sec" id="btn-csv">Exportar CSV</button></div></div>
+    <div class="titulo"><h2>Inventario</h2><div class="acciones"><button type="button" class="btn sec" id="btn-donde">¿Dónde hay?</button><button type="button" class="btn sec" id="btn-csv">Exportar CSV</button></div></div>
     <div class="filtros">
-      ${alms.length > 1
-        ? `<select id="f-alm">${alms.map(a => `<option value="${esc(a.id)}" ${a.id === F.ialm ? 'selected' : ''}>${esc(a.nombre)}</option>`).join('')}</select>`
+      ${alms.length > 1 || hayRed
+        ? `<select id="f-alm">${alms.map(a => `<option value="${esc(a.id)}" ${a.id === F.ialm ? 'selected' : ''}>${esc(a.nombre)}</option>`).join('')}
+            ${hayRed ? `<option value="*" ${F.ialm === '*' ? 'selected' : ''}>Todos los almacenes</option>` : ''}</select>`
         : `<span class="chip">${esc(alms[0] ? alms[0].nombre : 'Sin almacén asignado')}</span>`}
       <input id="f-q" type="search" placeholder="Buscar producto o escanear" value="${esc(F.iq || '')}" autocomplete="off">
       <label class="chk"><input type="checkbox" id="f-bajo" ${F.ibajo ? 'checked' : ''}> Solo bajo mínimo</label>
@@ -1154,17 +1161,23 @@ function vInventario(el) {
     <div id="lista"></div>`;
 
   const filas = () => {
-    const ex = mapaExistencias();
+    const red = F.ialm === '*';
+    const ex = red ? mapaRed() : mapaExistencias();
     const q = normal(F.iq || '');
     return S.catalogo.productos
       .filter(p => esActivo(p.activo) && (!q || coincide(p, q)))
-      .map(p => ({ p, c: ex[F.ialm + '|' + p.id] || 0 }))
+      .map(p => {
+        if (!red) return { p, c: ex[F.ialm + '|' + p.id] || 0 };
+        const por = todos.map(a => ex[a.id + '|' + p.id] || 0);
+        return { p, por, c: por.reduce((s, n) => s + n, 0) };
+      })
       .filter(x => !F.ibajo || (Number(x.p.stock_minimo) > 0 && x.c < Number(x.p.stock_minimo)))
       .sort((a, b) => porNombre(a.p, b.p));
   };
 
   const pintar = () => {
     const l = filas();
+    if (F.ialm === '*') return pintarRed(l);
     const costos = veCostos();
     const valor = l.reduce((s, x) => s + x.c * (Number(x.p.costo) || 0), 0);
     const bajos = l.filter(x => Number(x.p.stock_minimo) > 0 && x.c < Number(x.p.stock_minimo)).length;
@@ -1178,7 +1191,7 @@ function vInventario(el) {
         <thead><tr><th>Producto</th><th>Código</th><th class="num">Existencia</th><th class="num">Mínimo</th>${costos ? '<th class="num">Costo</th><th class="num">Valor</th>' : ''}</tr></thead>
         <tbody>${vis.map(({ p, c }) => {
           const bajo = Number(p.stock_minimo) > 0 && c < Number(p.stock_minimo);
-          return `<tr class="${bajo ? 'fila-alerta' : ''}"><td>${esc(p.nombre)}</td><td>${esc(p.codigo)}</td>
+          return `<tr class="clic ${bajo ? 'fila-alerta' : ''}" data-p="${esc(p.id)}"><td>${esc(p.nombre)}</td><td>${esc(p.codigo)}</td>
             <td class="num ${c < 0 ? 'txt-error' : ''}"><b>${numero(c)}</b> ${esc(p.unidad || '')}</td>
             <td class="num">${numero(p.stock_minimo)}</td>
             ${costos ? `<td class="num">${dinero(p.costo)}</td><td class="num">${dinero(c * (Number(p.costo) || 0))}</td>` : ''}</tr>`;
@@ -1186,8 +1199,37 @@ function vInventario(el) {
       ${l.length > 500 ? `<p class="nota">Mostrando 500 de ${l.length}. Usa la búsqueda o exporta el CSV.</p>` : ''}`
       : '<p class="vacio">Sin productos para mostrar.</p>';
   };
+  // Todos los almacenes: una columna por almacén y el total
+  const pintarRed = l => {
+    const mio = S.usuario.almacen_id;
+    const unidades = l.reduce((s, x) => s + Math.max(0, x.c), 0);
+    const sinNada = l.filter(x => x.c <= 0).length;
+    $('#res', el).innerHTML = `
+      <div class="tarjeta"><span>Productos</span><b>${numero(l.length)}</b></div>
+      <div class="tarjeta"><span>Unidades en todos los almacenes</span><b>${numero(unidades)}</b></div>
+      <div class="tarjeta ${sinNada ? 'alerta' : ''}"><span>Sin existencia en ningún lado</span><b>${numero(sinNada)}</b></div>
+      ${veCostos() && esGeneral() ? `<div class="tarjeta"><span>Valor a costo</span><b>${dinero(l.reduce((s, x) => s + Math.max(0, x.c) * (Number(x.p.costo) || 0), 0))}</b></div>` : ''}`;
+    const vis = l.slice(0, 500);
+    $('#lista', el).innerHTML = l.length ? `
+      <div class="tabla-cont"><table class="tabla tabla-red">
+        <thead><tr><th>Producto</th>${todos.map(a => `<th class="num ${a.id === mio ? 'col-mia' : ''}">${esc(a.nombre)}</th>`).join('')}<th class="num">Total</th></tr></thead>
+        <tbody>${vis.map(({ p, por, c }) => {
+          const bajo = Number(p.stock_minimo) > 0 && c < Number(p.stock_minimo);
+          return `<tr class="clic ${bajo ? 'fila-alerta' : ''}" data-p="${esc(p.id)}"><td>${esc(p.nombre)}<small>${esc(p.codigo)}</small></td>
+            ${por.map((n, i) => `<td class="num ${todos[i].id === mio ? 'col-mia' : ''} ${n > 0 ? '' : n < 0 ? 'txt-error' : 'txt-suave'}">${n ? numero(n) : '—'}</td>`).join('')}
+            <td class="num"><b>${numero(c)}</b> ${esc(p.unidad || '')}</td></tr>`;
+        }).join('')}</tbody></table></div>
+      ${l.length > 500 ? `<p class="nota">Mostrando 500 de ${l.length}. Usa la búsqueda o exporta el CSV.</p>` : ''}
+      <p class="nota">Toca un producto para ver dirección y teléfono de cada almacén${puedePedirTraspaso() ? ' o pedir un traspaso' : ''}. Existencias de la última actualización.</p>`
+      : '<p class="vacio">Sin productos para mostrar.</p>';
+  };
   pintar();
   S.refrescar = pintar;
+  $('#lista', el).onclick = e => {
+    const tr = e.target.closest('tr[data-p]');
+    if (tr) dlgDondeHay(S.idx.prod[tr.dataset.p], S.usuario.almacen_id || (F.ialm !== '*' ? F.ialm : ''));
+  };
+  $('#btn-donde', el).onclick = () => dlgDondeHay(null);
 
   const alm = $('#f-alm', el);
   if (alm) alm.onchange = () => { F.ialm = alm.value; pintar(); };
@@ -1195,6 +1237,17 @@ function vInventario(el) {
   q.oninput = () => { F.iq = q.value; pintar(); };
   $('#f-bajo', el).onchange = e => { F.ibajo = e.target.checked; pintar(); };
   $('#btn-csv', el).onclick = () => {
+    if (F.ialm === '*') {
+      const csvR = [['Producto', 'Codigo', 'Unidad'].concat(todos.map(a => a.nombre), ['Total'])]
+        .concat(filas().map(({ p, por, c }) => [p.nombre, p.codigo, p.unidad || ''].concat(por, [c])))
+        .map(f => f.map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\r\n');
+      const ar = document.createElement('a');
+      ar.href = URL.createObjectURL(new Blob(['\ufeff' + csvR], { type: 'text/csv;charset=utf-8' }));
+      ar.download = `inventario-todos-${new Date().toISOString().slice(0, 10)}.csv`;
+      ar.click();
+      setTimeout(() => URL.revokeObjectURL(ar.href), 2000);
+      return;
+    }
     const costos = veCostos();
     const enc = ['Producto', 'Codigo', 'Codigo de barras', 'Unidad', 'Existencia', 'Minimo'].concat(costos ? ['Costo', 'Valor'] : []);
     const csv = [enc].concat(filas().map(({ p, c }) => [p.nombre, p.codigo, p.codigo_barras || '', p.unidad || '', c, p.stock_minimo || 0]
@@ -1207,6 +1260,98 @@ function vInventario(el) {
     a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 2000);
   };
+}
+
+/* ---- Existencias en todos los almacenes ---- */
+// Junta lo de este usuario (con movimientos pendientes) y lo que hay en los demás almacenes (última sincronización)
+function mapaRed() {
+  const m = mapaExistencias();
+  (S.otras || []).forEach(([a, p, c]) => { const k = a + '|' + p; if (m[k] === undefined) m[k] = Number(c) || 0; });
+  return m;
+}
+const almacenesActivos = () => S.catalogo.almacenes.filter(a => esActivo(a.activo))
+  .sort((a, b) => (a.tipo === b.tipo ? porNombre(a, b) : a.tipo === 'BODEGA' ? -1 : 1));
+const puedePedirTraspaso = () => ['ADMIN_SUCURSAL', 'CAJERO'].includes(rol()) && !!S.usuario.almacen_id;
+
+// Cuánto hay en los otros almacenes (para avisar en la caja y en el visor)
+function resumenOtros(pid, miAlm, red = mapaRed()) {
+  return almacenesActivos().filter(a => a.id !== miAlm)
+    .map(a => ({ a, c: red[a.id + '|' + pid] || 0 })).filter(x => x.c > 0);
+}
+
+// ¿Dónde hay? Muestra la existencia del producto en cada almacén, con opción de pedir traspaso o dar los datos al cliente
+function dlgDondeHay(producto, miAlm = S.usuario.almacen_id) {
+  const d = abrirModal('¿Dónde hay?', `<div class="form">
+    <div id="dh-sel"></div>
+    <div id="dh-res"></div>
+    <p class="nota">Existencias de la última actualización (${S.ultimaSync ? fechaHora(S.ultimaSync) : 'nunca'}). Las de otras sucursales pueden haber cambiado desde entonces.</p>
+  </div>`, true);
+  const sel = selectorProducto($('#dh-sel', d), p => pintar(p));
+  const pintar = p => {
+    const res = $('#dh-res', d);
+    if (!p) { res.innerHTML = '<p class="vacio">Busca o escanea un producto.</p>'; return; }
+    const red = mapaRed();
+    const filas = almacenesActivos().map(a => ({ a, c: red[a.id + '|' + p.id] || 0, mio: a.id === miAlm }))
+      .sort((x, y) => (y.mio - x.mio) || (y.c - x.c));
+    const total = filas.reduce((s, x) => s + Math.max(0, x.c), 0);
+    const pedir = puedePedirTraspaso();
+    res.innerHTML = `<div class="dh-cab"><b>${esc(p.nombre)}</b><span>Total en todos los almacenes: <b>${numero(total)} ${esc(p.unidad || '')}</b></span></div>
+      <div class="tabla-cont"><table class="tabla"><thead><tr><th>Almacén</th><th>Dirección y teléfono</th><th class="num">Existencia</th><th></th></tr></thead>
+      <tbody>${filas.map(({ a, c, mio }) => `<tr class="${mio ? 'fila-mia' : ''}">
+        <td><b>${esc(a.nombre)}</b><small>${a.tipo === 'BODEGA' ? 'Bodega' : 'Sucursal'}${mio ? ' · aquí' : ''}</small></td>
+        <td>${esc(a.direccion || '—')}${a.telefono ? `<small>Tel. ${esc(a.telefono)}</small>` : ''}</td>
+        <td class="num ${c > 0 ? '' : 'txt-suave'}"><b>${numero(c)}</b> ${esc(p.unidad || '')}</td>
+        <td class="dh-acc">${!mio && c > 0 ? `${pedir ? `<button type="button" class="btn mini" data-pedir="${esc(a.id)}">Pedir traspaso</button>` : ''}
+          <button type="button" class="btn mini sec" data-datos="${esc(a.id)}">Datos para el cliente</button>` : ''}</td></tr>`).join('')}</tbody></table></div>
+      ${total <= 0 ? '<p class="aviso-caja">No hay existencia en ningún almacén.</p>' : ''}
+      <div id="dh-pedir"></div>`;
+    res.onclick = e => {
+      const bp = e.target.closest('[data-pedir]'), bd = e.target.closest('[data-datos]');
+      if (bd) imprimirDatosSucursal(p, S.idx.alm[bd.dataset.datos], red[bd.dataset.datos + '|' + p.id] || 0);
+      if (bp) formTraspaso(p, S.idx.alm[bp.dataset.pedir], red[bp.dataset.pedir + '|' + p.id] || 0);
+    };
+  };
+  // Pide al otro almacén que mande el producto a esta sucursal (llega como solicitud en su sección de Pedidos)
+  const formTraspaso = (p, origen, disponible) => {
+    const c = $('#dh-pedir', d);
+    c.innerHTML = `<form class="panel dh-form" id="fdh">
+      <h3>Pedir ${esc(p.nombre)} a ${esc(origen.nombre)}</h3>
+      <div class="fila2"><label>Cantidad<input name="cantidad" type="number" min="1" step="any" max="${disponible}" value="1" required inputmode="decimal"></label>
+        <label>Nota para ${esc(origen.nombre)}<input name="notas" maxlength="200" placeholder="Ej. Un cliente lo espera hoy"></label></div>
+      <p class="msg" id="fdh-msg"></p>
+      <div class="pie"><button type="button" class="btn sec" id="fdh-no">Cancelar</button><button class="btn" type="submit">Enviar solicitud</button></div></form>`;
+    const f = $('#fdh', c);
+    f.cantidad.focus(); f.cantidad.select();
+    $('#fdh-no', c).onclick = () => { c.innerHTML = ''; };
+    f.onsubmit = async ev => {
+      ev.preventDefault();
+      const msg = $('#fdh-msg', c);
+      const cant = Number(f.cantidad.value);
+      if (!(cant > 0)) { msg.textContent = 'Escribe la cantidad.'; return; }
+      if (!navigator.onLine) { msg.textContent = 'Necesitas conexión para enviar la solicitud.'; return; }
+      try {
+        const r = await conCarga('Enviando solicitud…', () => api('guardarPedido', { pedido: {
+          nuevo: true, id: uuid(), tipo: 'INTERNO', origen_id: origen.id, notas: f.notas.value.trim(),
+          lineas: [{ producto_id: p.id, cantidad: cant }] } }));
+        cerrarModal();
+        toast(`Solicitud ${r.pedido.folio} enviada a ${origen.nombre}. Llegará como traspaso a tu sucursal.`, 'ok');
+        if (rol() === 'ADMIN_SUCURSAL' && PD.datos) actualizarPedidoLocal(r.pedido);
+      } catch (e) { msg.textContent = e.message; }
+    };
+  };
+  if (producto) { sel.elegido = producto; sel.actualizar(); $('.sel-q', d).hidden = true; $('.elegido', d).hidden = false; }
+  else $('.sel-q', d).focus();
+  pintar(producto);
+}
+
+// Papelito para el cliente: a qué sucursal ir y cómo llegar
+function imprimirDatosSucursal(p, a, cantidad) {
+  imprimirDoc(() => [{ k: 'logo' }, { k: 'titulo', s: CFG.NOMBRE }, { k: 'sep' },
+    { k: 'centro', s: 'Su producto está disponible en', neg: false }, { k: 'titulo', s: a.nombre },
+    ...(a.direccion ? [{ k: 'centro', s: a.direccion }] : []), ...(a.telefono ? [{ k: 'centro', s: 'Tel. ' + a.telefono }] : []),
+    { k: 'sep' }, { k: 'txt', s: p.nombre }, { k: 'par', a: 'Precio', b: dinero(p.precio_menudeo) },
+    { k: 'txt', s: `Existencia al ${fechaHora(S.ultimaSync || Date.now())}: ${numero(cantidad)} ${p.unidad || ''}` },
+    { k: 'sep' }, { k: 'centro', s: 'Le recomendamos llamar antes de ir.' }]);
 }
 
 /* ---- Selector de producto (nombre, código o lector de código de barras) ---- */
@@ -2565,6 +2710,7 @@ function vCaja(el) {
     <div class="caja ${CJ.vista === 'imagenes' ? 'con-img' : 'solo-lista'}">
       <section class="caja-buscar">
         <div class="cj-busca"><input id="cj-q" type="search" placeholder="Escanea o busca (3*código = 3 piezas)" title="Escanea o busca por nombre o código. Escribe 3*código para agregar 3 piezas." autocomplete="off" value="${esc(CJ.q)}">
+          <button type="button" class="btn sec" id="cj-donde" title="Buscar en qué sucursal o bodega hay un producto">¿Dónde hay?</button>
           <div class="seg" id="cj-vista" role="group" aria-label="Vista de productos"><button type="button" data-vista="imagenes" class="${CJ.vista === 'imagenes' ? 'activo' : ''}">Con imágenes</button><button type="button" data-vista="lista" class="${CJ.vista === 'lista' ? 'activo' : ''}">Solo lista</button></div></div>
         <div class="cats" id="cj-cats"></div>
         <div class="cj-res ${CJ.vista === 'lista' ? 'en-lista' : ''}" id="cj-res"></div>
@@ -2589,7 +2735,8 @@ function vCaja(el) {
     .map(([id, n]) => `<button type="button" data-cat="${esc(id)}" class="${CJ.cat === id ? 'activo' : ''}">${esc(n)}</button>`).join('');
 
   const pintarRes = () => {
-    const ex = mapaExistencias();
+    const ex = mapaRed();
+    const enOtro = pid => S.catalogo.almacenes.some(a => a.id !== E.corte.almacen_id && esActivo(a.activo) && (ex[a.id + '|' + pid] || 0) > 0);
     const cli = clientePorId(CJ.ticket.cliente_id);
     const t = normal(CJ.q.replace(/^\d+(\.\d+)?\*/, ''));
     const lista = S.catalogo.productos
@@ -2598,7 +2745,7 @@ function vCaja(el) {
     const conImg = CJ.vista === 'imagenes';
     $('#cj-res', el).innerHTML = lista.length ? lista.map(p => {
       const c = ex[E.corte.almacen_id + '|' + p.id] || 0;
-      const exis = `<small class="${c <= 0 ? 'txt-error' : ''}">${numero(c)} ${esc(p.unidad || '')}</small>`;
+      const exis = `<small class="${c <= 0 ? 'txt-error' : ''}">${numero(c)} ${esc(p.unidad || '')}${c <= 0 && enOtro(p.id) ? ' · hay en otra' : ''}</small>`;
       if (!conImg) return `<button type="button" class="prod-fila" data-p="${esc(p.id)}"><span>${esc(p.nombre)}</span><span class="precio">${dinero(precioCliente(p, cli))}</span>${exis}</button>`;
       return `<button type="button" class="prod" data-p="${esc(p.id)}"><span class="prod-img">${p.imagen ? `<img data-img="${esc(p.imagen)}" alt="">` : `<i>${esc(iniciales(p.nombre))}</i>`}</span><b>${esc(p.nombre)}</b>
         <span class="fila-oc"><span class="precio">${dinero(precioCliente(p, cli))}</span>${exis}</span></button>`;
@@ -2615,7 +2762,10 @@ function vCaja(el) {
     const l = CJ.ticket.lineas.find(x => x.producto_id === p.id);
     v.innerHTML = `<div class="vis-img">${p.imagen ? `<img data-img="${esc(p.imagen)}" alt="">` : `<i>${esc(iniciales(p.nombre))}</i>`}</div>
       <div class="vis-txt"><b>${esc(p.nombre)}</b><span class="precio">${dinero(l ? l.precio : precioCliente(p, clientePorId(CJ.ticket.cliente_id)))}${l ? ` <small>× ${numero(l.cantidad)}</small>` : ''}</span>
-        ${p.descripcion ? `<p>${esc(p.descripcion)}</p>` : ''}<small>${p.codigo_barras ? esc(p.codigo_barras) + ' · ' : ''}Existencia: ${numero(c)} ${esc(p.unidad || '')}</small></div>`;
+        ${p.descripcion ? `<p>${esc(p.descripcion)}</p>` : ''}<small>${p.codigo_barras ? esc(p.codigo_barras) + ' · ' : ''}Existencia: ${numero(c)} ${esc(p.unidad || '')}</small>
+        ${(() => { const o = resumenOtros(p.id, E.corte.almacen_id); return o.length ? `<small class="vis-otras">En otros: ${o.slice(0, 3).map(x => `${esc(x.a.nombre)} ${numero(x.c)}`).join(' · ')}${o.length > 3 ? '…' : ''}</small>` : ''; })()}
+        <button type="button" class="btn mini sec" id="cj-vis-donde">¿Dónde hay?</button></div>`;
+    $('#cj-vis-donde', v).onclick = () => dlgDondeHay(p, E.corte.almacen_id);
     cargarImgs(v);
   };
   const pintarCuentas = () => {
@@ -2756,6 +2906,7 @@ function vCaja(el) {
       q.focus();
     }
   };
+  $('#cj-donde', el).onclick = () => dlgDondeHay(null, E.corte.almacen_id);
   $('#cj-vista', el).onclick = e => {
     const b = e.target.closest('[data-vista]');
     if (!b || b.dataset.vista === CJ.vista) return;
@@ -4026,7 +4177,9 @@ function dlgEditorPedido(base) {
   const nuevo = !base;
   const esSuc = rol() === 'ADMIN_SUCURSAL';
   const bodegas = S.catalogo.almacenes.filter(a => esActivo(a.activo) && a.tipo === 'BODEGA').sort(porNombre);
-  const origenes = rol() === 'INVENTARIOS' ? S.catalogo.almacenes.filter(a => a.id === S.usuario.almacen_id) : bodegas;
+  // La sucursal puede pedir a la bodega o a otra sucursal
+  const origenes = rol() === 'INVENTARIOS' ? S.catalogo.almacenes.filter(a => a.id === S.usuario.almacen_id)
+    : esSuc ? bodegas.concat(S.catalogo.almacenes.filter(a => esActivo(a.activo) && a.tipo === 'SUCURSAL' && a.id !== S.usuario.almacen_id).sort(porNombre)) : bodegas;
   const sucursales = S.catalogo.almacenes.filter(a => esActivo(a.activo) && a.tipo === 'SUCURSAL').sort(porNombre);
   const p = base ? JSON.parse(JSON.stringify(base)) : {
     tipo: esSuc ? 'INTERNO' : 'EXTERNO', origen_id: (origenes[0] || {}).id || '', cliente_id: '', destino_id: esSuc ? S.usuario.almacen_id : '',
@@ -4034,9 +4187,9 @@ function dlgEditorPedido(base) {
   };
   const lineas = p.lineas.map(l => ({ producto_id: l.producto_id, cantidad: Number(l.cantidad), precio: Number(l.precio) }));
   const clientes = (S.clientes || []).filter(c => c.activo !== false).sort(porNombre);
-  const d = abrirModal(nuevo ? (esSuc ? 'Solicitar mercancía a bodega' : 'Nuevo pedido') : `Editar ${p.folio}`, `
+  const d = abrirModal(nuevo ? (esSuc ? 'Solicitar mercancía' : 'Nuevo pedido') : `Editar ${p.folio}`, `
     <form id="fped" class="form" autocomplete="off">
-      ${esSuc ? `<p class="nota">La solicitud llega a la bodega para que la programe y la surta a ${esc((S.idx.alm[S.usuario.almacen_id] || {}).nombre || 'tu sucursal')}.</p>` : `
+      ${esSuc ? `<p class="nota">La solicitud llega al almacén que elijas en "Surte" para que la programe y la mande a ${esc((S.idx.alm[S.usuario.almacen_id] || {}).nombre || 'tu sucursal')}.</p>` : `
       <div class="segmentos" id="fp-tipo"><button type="button" data-tipo="EXTERNO">Cliente externo</button><button type="button" data-tipo="INTERNO">Sucursal</button></div>`}
       <div class="fila3">
         ${esSuc ? '' : `<label id="fp-cli">Cliente<select name="cliente_id"><option value="">Elige…</option>${clientes.map(c => `<option value="${esc(c.id)}" ${c.id === p.cliente_id ? 'selected' : ''}>${esc(c.nombre)}</option>`).join('')}</select></label>
@@ -4136,14 +4289,16 @@ function dlgEditorPedido(base) {
 
 function dlgPedido(p) {
   if (!p) return;
-  const bodega = esBodegaRol();
+  // Surte quien tiene el almacén de origen: bodega, o la sucursal a la que otra le pidió un traspaso
+  const bodega = esBodegaRol() || (rol() === 'ADMIN_SUCURSAL' && p.origen_id === S.usuario.almacen_id);
   const enRuta = p.envios.filter(e => e.estado === 'EN_RUTA');
   const hayPend = p.lineas.some(l => porSurtirLinea(l) > 0);
   const tieneEnvios = p.envios.some(e => e.estado !== 'CANCELADO');
   const acciones = [];
   if (bodega && ['SOLICITADO', 'PROGRAMADO', 'EN_PROCESO'].includes(p.estado)) acciones.push(['programar', p.estado === 'SOLICITADO' ? 'Aceptar y programar' : 'Reprogramar', 'sec']);
   if (bodega && ['SOLICITADO', 'PROGRAMADO', 'EN_PROCESO'].includes(p.estado) && hayPend) acciones.push(['surtir', 'Lotear / surtir', '']);
-  if (['SOLICITADO', 'PROGRAMADO'].includes(p.estado) && !tieneEnvios && (bodega || p.estado === 'SOLICITADO')) acciones.push(['editar', 'Editar', 'sec']);
+  const otraPidio = rol() === 'ADMIN_SUCURSAL' && p.destino_id !== S.usuario.almacen_id;   // solo quien pidió lo edita
+  if (['SOLICITADO', 'PROGRAMADO'].includes(p.estado) && !tieneEnvios && !otraPidio && (bodega || p.estado === 'SOLICITADO')) acciones.push(['editar', 'Editar', 'sec']);
   if (bodega && p.estado === 'EN_PROCESO' && !enRuta.length) acciones.push(['cerrar', 'Cerrar con faltante', 'sec']);
   if (['SOLICITADO', 'PROGRAMADO'].includes(p.estado) && !tieneEnvios && (bodega || p.estado === 'SOLICITADO')) acciones.push(['cancelar', 'Cancelar pedido', 'peligro']);
   const cli = p.tipo === 'EXTERNO' ? clientePorId(p.cliente_id) : null;
