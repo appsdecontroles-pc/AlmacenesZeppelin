@@ -304,3 +304,22 @@ dialog.ancho { width: min(980px, calc(100vw - 24px)); }
 .info-oc h4 { margin: 0 0 4px; font-size: .75rem; text-transform: uppercase; letter-spacing: .04em; color: var(--suave); }
 .aviso-offline { background: var(--aviso-suave); color: var(--aviso); padding: .6em .8em; border-radius: 8px; font-size: .9rem; }
 .logo-prev { width: 96px; height: 96px; object-fit: contain; background: #fff; border: 1px solid var(--borde); border-radius: 8px; }
+
+/* Cuentas por pagar */
+.cxp-PENDIENTE { background: var(--bg); color: var(--suave); border: 1px solid var(--borde); }
+.cxp-PARCIAL { background: var(--primario-suave); color: var(--primario); }
+.cxp-PAGADA { background: var(--ok-suave); color: var(--ok); }
+.cxp-POR_VENCER { background: var(--aviso-suave); color: var(--aviso); }
+.cxp-VENCIDA { background: var(--peligro); color: #fff; }
+.tarjeta.alerta-roja { border-color: var(--peligro); background: var(--peligro-suave); }
+.tarjeta.alerta-roja b { color: var(--peligro); }
+.saldo-grande { font-size: 1.3rem; color: var(--primario); }
+.burbuja {
+  display: inline-block; min-width: 1.4em; margin-left: 6px; padding: 0 .4em; border-radius: 999px; font-size: .72rem; line-height: 1.4em;
+  text-align: center; background: var(--aviso); color: #fff; vertical-align: 1px;
+}
+.burbuja.roja { background: var(--peligro); }
+details.panel-sub summary { cursor: pointer; }
+details.panel-sub[open] summary { margin-bottom: 10px; }
+.tabla tfoot td { background: var(--bg); border-top: 2px solid var(--borde); }
+.filtros label.chk input[type=month] { width: auto; }

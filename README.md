@@ -58,6 +58,19 @@ Los datos de la empresa y el logo del PDF se capturan en **Mi cuenta > Datos de 
 
 Al actualizar el servidor a esta versión hay que ejecutar **instalar** otra vez. Crea las hojas nuevas y la tarea diaria, y Google pedirá permisos nuevos para Drive y correo. No borra nada.
 
+## Cuentas por pagar (fase 3)
+
+En **Por pagar** (solo administrador general):
+
+- Al recibir mercancía de una orden se crea su cuenta: lo recibido más IVA, a contado o a crédito según los días del proveedor.
+- La factura (PDF, XML o foto) se adjunta al recibir o después. Se guarda en la carpeta "Facturas de proveedores" de Drive.
+- Pagos completos o abonos, con fecha, método y referencia, y botón "Liquidar saldo". Un pago capturado por error se puede eliminar.
+- Facturas sin orden (servicios, fletes, gastos) con "Nueva cuenta".
+- Resumen del mes: compras, pagos, saldo, vencido y por vencer, más saldos por proveedor. "Exportar mes a Excel" descarga cuentas, pagos y saldos.
+- Avisos: Inicio y el menú muestran lo vencido y lo que vence en 5 días. Cada mañana llega un correo al correo de la empresa (Mi cuenta > Datos de la empresa), una sola vez por cuenta al faltar 5 días y otra cuando se vence.
+
+Al actualizar el servidor a esta versión hay que ejecutar **instalar** otra vez. Crea las hojas CuentasPagar y Pagos, y las cuentas de las órdenes que ya estaban recibidas.
+
 ## Cómo funciona sin internet
 
 - Al entrar y cada 15 minutos, la app descarga catálogo, precios y existencias, y los guarda en el equipo.

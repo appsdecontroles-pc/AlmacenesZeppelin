@@ -4,7 +4,7 @@
  * Servidor: Google Apps Script (API) + Google Sheets (base de datos). */
 
 const CFG = Object.assign({ NOMBRE: 'Control de Inventario', SYNC_MINUTOS: 15, API_URL: '' }, window.APP_CONFIG || {});
-const VERSION_APP = '2.0.0';
+const VERSION_APP = '3.0.0';
 
 const ROL_TXT = {
   ADMIN_GENERAL: 'Administrador general',
@@ -30,7 +30,8 @@ const S = {
   existencias: [], version: 0, rolCatalogo: '', ultimaSync: 0,
   online: navigator.onLine, outbox: [], vista: 'inicio',
   sincronizando: false, otraVez: false, idx: { prod: {}, cat: {}, alm: {}, barras: {}, codigo: {} },
-  refrescar: null
+  refrescar: null,
+  alertas: null
 };
 const F = {}; // filtros que se recuerdan entre vistas
 let promptInstalar = null;
@@ -121,6 +122,7 @@ function toast(msg, tipo = '') {
 function abrirModal(titulo, html, ancho = false) {
   const d = $('#dlg');
   d.classList.toggle('ancho', ancho);
+  d.onclick = null;
   d.innerHTML = `<form method="dialog" class="dlg-cab"><h2>${esc(titulo)}</h2><button class="icono" aria-label="Cerrar">✕</button></form><div class="dlg-cuerpo">${html}</div>`;
   if (!d.open) d.showModal();
   return d;
@@ -246,7 +248,7 @@ function mapaExistencias() {
 
 /* ---------------- Sesión ---------------- */
 async function cargarSesion(ses) {
-  if (!S.usuario || S.usuario.usuario !== ses.usuario.usuario) CMP.datos = null;
+  if (!S.usuario || S.usuario.usuario !== ses.usuario.usuario) { CMP.datos = null; CPP.datos = null; }
   S.token = ses.token;
   S.usuario = ses.usuario;
   const [cat, ex, ver, rolCat, ult, out] = await Promise.all([
@@ -258,6 +260,7 @@ async function cargarSesion(ses) {
   S.rolCatalogo = rolCat || '';
   S.ultimaSync = ult || 0;
   S.outbox = out || [];
+  S.alertas = esGeneral() ? (await DB.get('alertas')) || null : null;
   indexar();
 }
 
@@ -372,6 +375,8 @@ async function sincronizar(manual = false) {
     }
     S.existencias = d.existencias || [];
     await DB.set('existencias', S.existencias);
+    S.alertas = d.alertas || null;
+    await DB.set('alertas', S.alertas);
     S.usuario = d.usuario;
     const ses = await DB.get('sesion');
     if (ses) { ses.usuario = d.usuario; ses.offline = false; await DB.set('sesion', ses); }
@@ -398,6 +403,7 @@ const VISTAS = {
   inventario: { titulo: 'Inventario', roles: ['ADMIN_GENERAL', 'ADMIN_SUCURSAL', 'INVENTARIOS', 'CAJERO'], render: vInventario },
   movimientos: { titulo: 'Movimientos', roles: ['ADMIN_GENERAL', 'ADMIN_SUCURSAL', 'INVENTARIOS'], render: vMovimientos },
   compras: { titulo: 'Compras', roles: ['ADMIN_GENERAL', 'INVENTARIOS'], render: vCompras },
+  pagar: { titulo: 'Por pagar', roles: ['ADMIN_GENERAL'], render: vPagar },
   almacenes: { titulo: 'Almacenes', roles: ['ADMIN_GENERAL'], render: vAlmacenes },
   usuarios: { titulo: 'Usuarios', roles: ['ADMIN_GENERAL', 'ADMIN_SUCURSAL'], render: vUsuarios },
   cuenta: { titulo: 'Mi cuenta', roles: null, render: vCuenta }
@@ -424,7 +430,10 @@ function mostrarApp() {
 
 function pintarMenu() {
   $('#menu').innerHTML = Object.keys(VISTAS).filter(puedeVer)
-    .map(k => `<button type="button" data-v="${k}" class="${S.vista === k ? 'activo' : ''}">${VISTAS[k].titulo}</button>`).join('');
+    .map(k => {
+      const n = k === 'pagar' && S.alertas ? S.alertas.vencidas + S.alertas.por_vencer : 0;
+      return `<button type="button" data-v="${k}" class="${S.vista === k ? 'activo' : ''}">${VISTAS[k].titulo}${n ? `<span class="burbuja ${S.alertas.vencidas ? 'roja' : ''}">${n}</span>` : ''}</button>`;
+    }).join('');
 }
 
 function irA(k) {
@@ -481,6 +490,9 @@ function vInicio(el) {
       <div class="tarjeta"><span>${esGeneral() ? 'Almacenes activos' : 'Almacén'}</span><b>${esGeneral() ? alms.length : esc(miAlm ? miAlm.nombre : '—')}</b></div>
       <button type="button" class="tarjeta ${bajos ? 'alerta' : ''}" id="t-bajos"><span>Bajo mínimo</span><b>${numero(bajos)}</b></button>
       ${veCostos() ? `<div class="tarjeta"><span>Valor del inventario (costo)</span><b>${dinero(valor)}</b></div>` : ''}
+      ${esGeneral() && S.alertas ? `
+        <button type="button" class="tarjeta ${S.alertas.vencidas ? 'alerta-roja' : ''}" data-pagos="vencidas"><span>Pagos vencidos</span><b>${dinero(S.alertas.monto_vencido)}</b><small>${plural(S.alertas.vencidas, 'cuenta')}</small></button>
+        <button type="button" class="tarjeta ${S.alertas.por_vencer ? 'alerta' : ''}" data-pagos="por_vencer"><span>Pagos que vencen en ${S.alertas.dias} días</span><b>${dinero(S.alertas.monto_por_vencer)}</b><small>${plural(S.alertas.por_vencer, 'cuenta')}</small></button>` : ''}
     </div>
     <div class="panel">
       <h3>Sincronización</h3>
@@ -492,6 +504,7 @@ function vInicio(el) {
     </div>`;
   $('#btn-sync', el).onclick = () => sincronizar(true);
   $('#t-bajos', el).onclick = () => { F.ibajo = true; irA('inventario'); };
+  $$('[data-pagos]', el).forEach(b => { b.onclick = () => { CPP.filtro = b.dataset.pagos; irA('pagar'); }; });
   S.refrescar = () => vInicio(el);
 }
 
@@ -1721,11 +1734,15 @@ function dlgRecibir(o) {
             <td class="num"><input type="number" min="0" step="0.01" data-i="${i}" data-k="costo" value="${l.costo}"></td></tr>`;
         }).join('')}</tbody></table></div>
       <div class="fila2"><label>Folio de factura o remisión<input name="factura"></label><label>Notas<input name="notas"></label></div>
+      <label class="archivo"><input type="file" name="archivos" multiple accept=".pdf,.xml,.jpg,.jpeg,.png"><span>Adjuntar factura (PDF, XML o foto) — opcional</span></label>
       <label class="chk"><input type="checkbox" name="actualizar" checked> Actualizar el costo de los productos con el costo recibido</label>
       <p class="msg" id="frec-msg"></p>
       <div class="pie"><button type="button" class="btn sec" data-cerrar>Cancelar</button><button class="btn" type="submit">Registrar recepción</button></div>
     </form>`, true);
   const f = $('#frec', d);
+  f.archivos.onchange = () => {
+    $('.archivo span', d).textContent = Array.from(f.archivos.files).map(a => a.name).join(', ') || 'Adjuntar factura (PDF, XML o foto) — opcional';
+  };
   f.onsubmit = async ev => {
     ev.preventDefault();
     const msg = $('#frec-msg', d);
@@ -1744,8 +1761,16 @@ function dlgRecibir(o) {
         actualizar_costo: f.actualizar.checked, lineas: lineas.map(({ linea_id, cantidad, costo }) => ({ linea_id, cantidad, costo }))
       }));
       actualizarOrdenLocal(r.orden);
+      const archivos = Array.from(f.archivos.files);
       cerrarModal();
       toast(r.orden.estado === 'RECIBIDA' ? `${r.orden.folio} recibida completa. Inventario actualizado.` : `${r.orden.folio}: recepción parcial registrada.`, 'ok');
+      if (archivos.length && r.cuenta_id) {
+        try {
+          await conCarga('Subiendo factura…', () => subirFacturas(r.cuenta_id, archivos, recepcionId));
+          toast('Factura adjunta a la cuenta por pagar.', 'ok');
+        } catch (err) { toast('La recepción quedó registrada, pero la factura no se subió: ' + err.message, 'error'); }
+      }
+      CPP.cargado = 0;
       if (CMP.repintar) CMP.repintar();
       sincronizar();
     } catch (e) {
@@ -1822,6 +1847,424 @@ async function dlgEmpresa() {
       toast('Datos de la empresa guardados.', 'ok');
     } catch (e) { msg.textContent = e.message; }
   };
+}
+
+/* ---- Cuentas por pagar (fase 3) ---- */
+const CXP_TXT = { PENDIENTE: 'Pendiente', PARCIAL: 'Abonada', PAGADA: 'Pagada', VENCIDA: 'Vencida', POR_VENCER: 'Por vencer' };
+const METODO_TXT = { TRANSFERENCIA: 'Transferencia', EFECTIVO: 'Efectivo', CHEQUE: 'Cheque', TARJETA: 'Tarjeta', OTRO: 'Otro' };
+const CPP = { datos: null, cargado: 0, offline: false, mes: '', filtro: 'abiertas', prov: '', q: '' };
+const DIAS_AVISO = 5;
+
+function sumarDiasYmd(ymd, n) {
+  const d = new Date(ymd + 'T12:00:00Z');
+  d.setUTCDate(d.getUTCDate() + Number(n || 0));
+  return d.toISOString().slice(0, 10);
+}
+function estadoCuenta(c) {
+  if (Number(c.saldo) <= 0.005) return 'PAGADA';
+  const hoy = hoyLocal();
+  if (String(c.vence) < hoy) return 'VENCIDA';
+  if (String(c.vence) <= hoyLocal(DIAS_AVISO)) return 'POR_VENCER';
+  return c.estado === 'PARCIAL' ? 'PARCIAL' : 'PENDIENTE';
+}
+const chipCuenta = c => { const e = estadoCuenta(c); return `<span class="est cxp-${e}">${CXP_TXT[e]}</span>`; };
+const provCxp = id => ((CPP.datos && CPP.datos.proveedores.find(p => p.id === id)) || {});
+const plural = (n, palabra) => `${n} ${palabra}${n === 1 ? '' : 's'}`;
+const condicionTxt = c => (c.condicion === 'CREDITO' ? `Crédito ${Number(c.dias_credito) || 0} días` : 'Contado');
+
+function leerBase64(archivo) {
+  return new Promise((ok, mal) => {
+    if (archivo.size > 10 * 1024 * 1024) { mal(new Error(`"${archivo.name}" pesa más de 10 MB.`)); return; }
+    const r = new FileReader();
+    r.onload = () => ok(String(r.result).split(',')[1] || '');
+    r.onerror = () => mal(new Error(`No se pudo leer "${archivo.name}".`));
+    r.readAsDataURL(archivo);
+  });
+}
+// Sube las facturas elegidas a una cuenta. Devuelve la cuenta actualizada (o null).
+async function subirFacturas(cuentaId, archivos, prefijo) {
+  let cuenta = null;
+  for (let i = 0; i < archivos.length; i++) {
+    const a = archivos[i];
+    const base64 = await leerBase64(a);
+    cuenta = await api('subirArchivo', { cuenta_id: cuentaId, nombre: a.name, base64, subida_id: `${prefijo}-${i}` });
+  }
+  return cuenta;
+}
+
+async function cargarCuentas() {
+  if (!navigator.onLine) {
+    const snap = await DB.get('cuentas');
+    if (!snap || snap.usuario !== S.usuario.usuario) throw new Error('Sin conexión y sin datos guardados de cuentas en este equipo.');
+    Object.assign(CPP, { datos: snap.datos, cargado: snap.fecha, offline: true });
+    return;
+  }
+  CPP.datos = await api('cuentas');
+  CPP.cargado = Date.now();
+  CPP.offline = false;
+  guardarSnapshotCuentas();
+}
+function guardarSnapshotCuentas() {
+  DB.set('cuentas', { datos: CPP.datos, fecha: CPP.cargado, usuario: S.usuario.usuario }).catch(() => {});
+}
+function aplicarDetalle(det) {
+  upsert(CPP.datos.cuentas, det.cuenta || det);
+  if (det.pagos) {
+    const id = det.cuenta.id;
+    CPP.datos.pagos = CPP.datos.pagos.filter(p => p.cuenta_id !== id).concat(det.pagos);
+  }
+  guardarSnapshotCuentas();
+}
+
+function vPagar(el) {
+  if (!CPP.mes) CPP.mes = hoyLocal().slice(0, 7);
+  el.innerHTML = `
+    <div class="titulo"><h2>Cuentas por pagar</h2><div class="acciones">
+      <button type="button" class="btn sec" id="p-exportar">Exportar mes a Excel</button>
+      <button type="button" class="btn" id="p-nueva">Nueva cuenta</button></div></div>
+    <div class="filtros">
+      <label class="chk">Mes <input type="month" id="p-mes" value="${esc(CPP.mes)}"></label>
+      <select id="p-filtro">
+        ${[['abiertas', 'Con saldo pendiente'], ['vencidas', 'Vencidas'], ['por_vencer', `Vencen en ${DIAS_AVISO} días`],
+          ['mes', 'Todas las del mes'], ['pagadas', 'Pagadas en el mes']].map(([k, t]) => `<option value="${k}" ${CPP.filtro === k ? 'selected' : ''}>${t}</option>`).join('')}
+      </select>
+      <select id="p-prov"><option value="">Todos los proveedores</option></select>
+      <input id="p-q" type="search" placeholder="Buscar factura u orden" value="${esc(CPP.q)}">
+    </div>
+    <div id="p-aviso"></div>
+    <div id="p-res" class="tarjetas"></div>
+    <div id="p-lista"><p class="nota">Cargando…</p></div>
+    <div id="p-saldos"></div>`;
+
+  const pintar = () => {
+    if (!CPP.datos) return;
+    const D = CPP.datos;
+    const hoy = hoyLocal(), lim = hoyLocal(DIAS_AVISO), mes = CPP.mes;
+    const selProv = $('#p-prov', el);
+    if (selProv.options.length === 1) {
+      selProv.innerHTML += D.proveedores.slice().sort(porNombre).map(p => `<option value="${esc(p.id)}" ${CPP.prov === p.id ? 'selected' : ''}>${esc(p.nombre)}</option>`).join('');
+    }
+    $('#p-aviso', el).innerHTML = CPP.offline ? `<p class="aviso-offline">Sin conexión: mostrando los datos de ${hace(CPP.cargado)}. Solo consulta.</p>` : '';
+
+    const abiertas = D.cuentas.filter(c => Number(c.saldo) > 0.005);
+    const vencidas = abiertas.filter(c => String(c.vence) < hoy);
+    const porVencer = abiertas.filter(c => String(c.vence) >= hoy && String(c.vence) <= lim);
+    const delMes = D.cuentas.filter(c => String(c.fecha_cuenta).slice(0, 7) === mes);
+    const pagosMes = D.pagos.filter(p => String(p.fecha_pago).slice(0, 7) === mes);
+    const suma = (l, k) => l.reduce((s, x) => s + (Number(x[k]) || 0), 0);
+    const [anio, m] = mes.split('-');
+    const nombreMes = new Date(Number(anio), Number(m) - 1, 1).toLocaleDateString('es-MX', { month: 'long', year: 'numeric' });
+    $('#p-res', el).innerHTML = `
+      <div class="tarjeta"><span>Compras de ${esc(nombreMes)}</span><b>${dinero(suma(delMes, 'monto'))}</b><small>${plural(delMes.length, 'factura')}</small></div>
+      <div class="tarjeta"><span>Pagado en ${esc(nombreMes)}</span><b>${dinero(suma(pagosMes, 'monto'))}</b><small>${plural(pagosMes.length, 'pago')}</small></div>
+      <div class="tarjeta"><span>Saldo pendiente total</span><b>${dinero(suma(abiertas, 'saldo'))}</b><small>${plural(abiertas.length, 'cuenta')}</small></div>
+      <button type="button" class="tarjeta ${vencidas.length ? 'alerta-roja' : ''}" data-f="vencidas"><span>Vencido</span><b>${dinero(suma(vencidas, 'saldo'))}</b><small>${plural(vencidas.length, 'cuenta')}</small></button>
+      <button type="button" class="tarjeta ${porVencer.length ? 'alerta' : ''}" data-f="por_vencer"><span>Vence en ${DIAS_AVISO} días</span><b>${dinero(suma(porVencer, 'saldo'))}</b><small>${plural(porVencer.length, 'cuenta')}</small></button>`;
+
+    const idsPagadasMes = new Set(pagosMes.map(p => p.cuenta_id));
+    let lista = {
+      abiertas, vencidas, por_vencer: porVencer, mes: delMes,
+      pagadas: D.cuentas.filter(c => Number(c.saldo) <= 0.005 && idsPagadasMes.has(c.id))
+    }[CPP.filtro] || abiertas;
+    const q = normal(CPP.q);
+    lista = lista.filter(c => (!CPP.prov || c.proveedor_id === CPP.prov) && (!q || normal(`${c.factura} ${c.folio_oc}`).includes(q)));
+    lista.sort((a, b) => (['abiertas', 'vencidas', 'por_vencer'].includes(CPP.filtro)
+      ? String(a.vence).localeCompare(String(b.vence)) : String(b.fecha_cuenta).localeCompare(String(a.fecha_cuenta))));
+    $('#p-lista', el).innerHTML = lista.length ? `<div class="tabla-cont"><table class="tabla">
+      <thead><tr><th>Fecha</th><th>Proveedor</th><th>Factura</th><th>Orden</th><th>Condición</th><th>Vence</th><th class="num">Total</th><th class="num">Saldo</th><th>Estado</th><th></th></tr></thead>
+      <tbody>${lista.map(c => `<tr class="clic" data-c="${esc(c.id)}"><td>${fechaCorta(c.fecha_cuenta)}</td><td>${esc(provCxp(c.proveedor_id).nombre || '—')}</td>
+        <td>${esc(c.factura || '—')}</td><td>${esc(c.folio_oc || 'Manual')}</td><td>${condicionTxt(c)}</td><td>${fechaCorta(c.vence)}</td>
+        <td class="num">${dinero(c.monto)}</td><td class="num"><b>${dinero(c.saldo)}</b></td><td>${chipCuenta(c)}</td>
+        <td>${c.archivos.length ? `<span title="Factura adjunta">📎${c.archivos.length > 1 ? c.archivos.length : ''}</span>` : ''}</td></tr>`).join('')}</tbody>
+      <tfoot><tr><td colspan="6"><b>${plural(lista.length, 'cuenta')}</b></td><td class="num"><b>${dinero(suma(lista, 'monto'))}</b></td><td class="num"><b>${dinero(suma(lista, 'saldo'))}</b></td><td colspan="2"></td></tr></tfoot>
+      </table></div>` : '<p class="vacio">No hay cuentas con esos filtros.</p>';
+
+    // Saldos por proveedor
+    const porProv = {};
+    abiertas.forEach(c => {
+      const k = c.proveedor_id;
+      porProv[k] = porProv[k] || { saldo: 0, vencido: 0, n: 0 };
+      porProv[k].saldo += Number(c.saldo);
+      porProv[k].n++;
+      if (String(c.vence) < hoy) porProv[k].vencido += Number(c.saldo);
+    });
+    const filas = Object.entries(porProv).sort((a, b) => b[1].saldo - a[1].saldo);
+    $('#p-saldos', el).innerHTML = filas.length ? `<div class="panel"><h3>Saldos por proveedor</h3><div class="tabla-cont"><table class="tabla">
+      <thead><tr><th>Proveedor</th><th class="num">Cuentas</th><th class="num">Vencido</th><th class="num">Saldo</th></tr></thead>
+      <tbody>${filas.map(([id, v]) => `<tr class="clic" data-prov="${esc(id)}"><td>${esc(provCxp(id).nombre || '—')}</td><td class="num">${v.n}</td>
+        <td class="num ${v.vencido ? 'txt-error' : ''}">${dinero(v.vencido)}</td><td class="num"><b>${dinero(v.saldo)}</b></td></tr>`).join('')}</tbody></table></div></div>` : '';
+  };
+
+  const recargar = async animar => {
+    try {
+      if (animar) await conCarga('Cargando cuentas…', cargarCuentas); else await cargarCuentas();
+      pintar();
+    } catch (e) {
+      $('#p-lista', el).innerHTML = `<p class="txt-error">${esc(e.message)}</p>`;
+      if (e.sesion) sesionVencida(e.message);
+    }
+  };
+  S.refrescar = pintar;
+  CPP.repintar = pintar;
+  $('#p-mes', el).onchange = e => { CPP.mes = e.target.value || hoyLocal().slice(0, 7); pintar(); };
+  $('#p-filtro', el).onchange = e => { CPP.filtro = e.target.value; pintar(); };
+  $('#p-prov', el).onchange = e => { CPP.prov = e.target.value; pintar(); };
+  $('#p-q', el).oninput = e => { CPP.q = e.target.value; pintar(); };
+  $('#p-res', el).onclick = e => {
+    const b = e.target.closest('[data-f]');
+    if (b) { CPP.filtro = b.dataset.f; $('#p-filtro', el).value = CPP.filtro; pintar(); }
+  };
+  $('#p-lista', el).onclick = e => {
+    const tr = e.target.closest('[data-c]');
+    if (tr) dlgCuenta(CPP.datos.cuentas.find(c => c.id === tr.dataset.c));
+  };
+  $('#p-saldos', el).onclick = e => {
+    const tr = e.target.closest('[data-prov]');
+    if (tr) { CPP.prov = tr.dataset.prov; CPP.filtro = 'abiertas'; vPagar(el); }
+  };
+  $('#p-nueva', el).onclick = () => CPP.datos && dlgNuevaCuenta();
+  $('#p-exportar', el).onclick = () => CPP.datos && exportarMes();
+  if (CPP.datos) pintar();
+  if (!CPP.datos || Date.now() - CPP.cargado > 60000 || (CPP.offline && navigator.onLine)) recargar(!CPP.datos);
+}
+
+function dlgCuenta(c) {
+  if (!c) return;
+  const prov = provCxp(c.proveedor_id);
+  const pagos = CPP.datos.pagos.filter(p => p.cuenta_id === c.id).sort((a, b) => String(a.fecha_pago).localeCompare(String(b.fecha_pago)));
+  const abierta = Number(c.saldo) > 0.005;
+  const d = abrirModal(`Cuenta por pagar · ${prov.nombre || ''}`, `
+    <div class="form">
+      <div class="titulo"><span>${chipCuenta(c)} <span class="nota">${esc(condicionTxt(c))} · vence ${fechaCorta(c.vence)}</span></span>
+        <span>Saldo <b class="saldo-grande">${dinero(c.saldo)}</b></span></div>
+      <div class="info-oc">
+        <div><h4>Proveedor</h4><b>${esc(prov.nombre || '—')}</b>${prov.rfc ? '<br>RFC: ' + esc(prov.rfc) : ''}${prov.email ? '<br>' + esc(prov.email) : ''}</div>
+        <div><h4>Origen</h4>${c.folio_oc ? `Orden de compra <b>${esc(c.folio_oc)}</b><br>Monto: ${c.monto_manual ? 'capturado a mano' : 'lo recibido + IVA'}` : 'Captura manual'}<br>Fecha: ${fechaCorta(c.fecha_cuenta)}</div>
+        <div><h4>Importes</h4>Total: <b>${dinero(c.monto)}</b><br>Pagado: ${dinero(c.pagado)}<br>Saldo: <b>${dinero(c.saldo)}</b></div>
+      </div>
+
+      ${abierta && !CPP.offline ? `<div class="panel-sub" id="cx-pago"><b>Registrar pago</b>
+        <div class="fila3">
+          <label>Monto<input name="monto" type="number" step="0.01" min="0.01" value="${Number(c.saldo).toFixed(2)}"></label>
+          <label>Fecha de pago<input name="fecha" type="date" value="${hoyLocal()}"></label>
+          <label>Método<select name="metodo">${Object.entries(METODO_TXT).map(([k, t]) => `<option value="${k}">${t}</option>`).join('')}</select></label>
+        </div>
+        <label>Referencia (folio de transferencia, número de cheque…)<input name="referencia"></label>
+        <p class="msg" id="cx-pago-msg"></p>
+        <div class="acciones"><button type="button" class="btn" id="cx-pagar">Registrar pago</button>
+          <button type="button" class="btn sec" id="cx-liquidar">Liquidar saldo (${dinero(c.saldo)})</button></div></div>` : ''}
+
+      <div><h3>Pagos</h3>${pagos.length ? `<div class="tabla-cont"><table class="tabla"><thead><tr><th>Fecha</th><th>Método</th><th>Referencia</th><th class="num">Monto</th><th></th></tr></thead>
+        <tbody>${pagos.map(p => `<tr><td>${fechaCorta(p.fecha_pago)}</td><td>${METODO_TXT[p.metodo] || p.metodo}</td><td>${esc(p.referencia || '—')}</td>
+          <td class="num">${dinero(p.monto)}</td><td>${CPP.offline ? '' : `<button type="button" class="btn mini peligro" data-borrar-pago="${esc(p.id)}">Eliminar</button>`}</td></tr>`).join('')}</tbody></table></div>`
+        : '<p class="nota">Sin pagos registrados.</p>'}</div>
+
+      <div><h3>Factura</h3>
+        ${c.archivos.length ? `<ul class="lista">${c.archivos.map(a => `<li><span>📄 ${esc(a.nombre)} <small>${fechaCorta(a.fecha)}</small></span>
+          <span class="acciones"><button type="button" class="btn mini sec" data-bajar="${esc(a.id)}">Descargar</button>
+          ${CPP.offline ? '' : `<button type="button" class="btn mini peligro" data-quitar-arch="${esc(a.id)}">Quitar</button>`}</span></li>`).join('')}</ul>` : '<p class="nota">Sin factura adjunta.</p>'}
+        ${CPP.offline ? '' : `<label class="archivo"><input type="file" id="cx-arch" multiple accept=".pdf,.xml,.jpg,.jpeg,.png"><span>Adjuntar factura (PDF, XML o foto)</span></label>`}
+      </div>
+
+      ${CPP.offline ? '' : `<details class="panel-sub"><summary><b>Editar datos de la cuenta</b></summary>
+        <form id="cx-edit" class="form">
+          <div class="fila2"><label>Folio de factura<input name="factura" value="${esc(c.factura || '')}"></label>
+            <label>Monto total<input name="monto" type="number" step="0.01" min="0.01" value="${Number(c.monto).toFixed(2)}"></label></div>
+          ${c.folio_oc && c.monto_manual ? '<p class="nota">El monto se capturó a mano. <button type="button" class="btn mini sec" id="cx-recalc">Volver a calcular con lo recibido</button></p>' : ''}
+          <div class="fila3"><label>Condición<select name="condicion"><option value="CONTADO" ${c.condicion !== 'CREDITO' ? 'selected' : ''}>Contado</option>
+            <option value="CREDITO" ${c.condicion === 'CREDITO' ? 'selected' : ''}>Crédito</option></select></label>
+            <label id="cx-dias">Días de crédito<input name="dias_credito" type="number" min="0" step="1" value="${Number(c.dias_credito) || 0}"></label>
+            <label>Vence<input name="vence" type="date" value="${esc(c.vence)}"></label></div>
+          <label>Notas<input name="notas" value="${esc(c.notas || '')}"></label>
+          <p class="msg" id="cx-edit-msg"></p>
+          <div class="pie"><button class="btn" type="submit">Guardar cambios</button></div>
+        </form></details>`}
+    </div>`, true);
+
+  const reabrir = det => {
+    aplicarDetalle(det);
+    if (CPP.repintar) CPP.repintar();
+    dlgCuenta(CPP.datos.cuentas.find(x => x.id === c.id));
+  };
+
+  const fp = $('#cx-pago', d);
+  if (fp) {
+    const pagar = async liquidar => {
+      const msg = $('#cx-pago-msg', d);
+      const monto = liquidar ? Number(c.saldo) : Number($('[name=monto]', fp).value);
+      if (!(monto > 0)) { msg.textContent = 'Captura el monto del pago.'; return; }
+      if (liquidar && !confirm(`¿Registrar un pago de ${dinero(monto)} para liquidar la cuenta?`)) return;
+      msg.textContent = '';
+      try {
+        const det = await conCarga('Registrando pago…', () => api('registrarPago', { pago: {
+          id: fp.dataset.pagoId || (fp.dataset.pagoId = uuid()), cuenta_id: c.id, monto, fecha_pago: $('[name=fecha]', fp).value,
+          metodo: $('[name=metodo]', fp).value, referencia: $('[name=referencia]', fp).value.trim()
+        } }));
+        toast(det.cuenta.estado === 'PAGADA' ? 'Cuenta liquidada.' : `Pago registrado. Saldo: ${dinero(det.cuenta.saldo)}.`, 'ok');
+        reabrir(det);
+        actualizarAlertasLocales();
+      } catch (e) { msg.textContent = e.message; }
+    };
+    $('#cx-pagar', d).onclick = () => pagar(false);
+    $('#cx-liquidar', d).onclick = () => pagar(true);
+  }
+
+  d.onclick = async e => {
+    const borrar = e.target.closest('[data-borrar-pago]');
+    const bajar = e.target.closest('[data-bajar]');
+    const quitar = e.target.closest('[data-quitar-arch]');
+    try {
+      if (borrar && confirm('¿Eliminar este pago? El saldo de la cuenta volverá a aumentar.')) {
+        reabrir(await conCarga('Eliminando…', () => api('eliminarPago', { id: borrar.dataset.borrarPago })));
+        actualizarAlertasLocales();
+      }
+      if (bajar) {
+        const r = await conCarga('Descargando…', () => api('archivoCuenta', { cuenta_id: c.id, archivo_id: bajar.dataset.bajar }));
+        Excel.descargar(new Blob([Uint8Array.from(atob(r.base64), x => x.charCodeAt(0))], { type: r.tipo }), r.nombre);
+      }
+      if (quitar && confirm('¿Quitar este archivo? Se enviará a la papelera de Drive.')) {
+        const cu = await conCarga('Quitando…', () => api('quitarArchivo', { cuenta_id: c.id, archivo_id: quitar.dataset.quitarArch }));
+        reabrir({ cuenta: cu });
+      }
+    } catch (err) { toast(err.message, 'error'); }
+  };
+
+  const arch = $('#cx-arch', d);
+  if (arch) arch.onchange = async () => {
+    if (!arch.files.length) return;
+    try {
+      const cu = await conCarga('Subiendo factura…', () => subirFacturas(c.id, Array.from(arch.files), uuid()));
+      toast('Factura adjunta.', 'ok');
+      reabrir({ cuenta: cu });
+    } catch (e) { toast(e.message, 'error'); }
+  };
+
+  const fe = $('#cx-edit', d);
+  if (fe) {
+    const diasVis = () => { $('#cx-dias', d).hidden = fe.condicion.value !== 'CREDITO'; };
+    const recalcVence = () => {
+      const dias = fe.condicion.value === 'CREDITO' ? Number(fe.dias_credito.value) || 0 : 0;
+      fe.vence.value = sumarDiasYmd(String(c.fecha_cuenta).slice(0, 10), dias);
+    };
+    diasVis();
+    fe.condicion.onchange = () => { diasVis(); recalcVence(); };
+    fe.dias_credito.oninput = recalcVence;
+    const guardar = async recalcular => {
+      const msg = $('#cx-edit-msg', d);
+      msg.textContent = '';
+      try {
+        const cu = await conCarga('Guardando…', () => api('guardarCuenta', { cuenta: {
+          id: c.id, factura: fe.factura.value.trim(), monto: recalcular ? '' : fe.monto.value, condicion: fe.condicion.value,
+          dias_credito: fe.dias_credito.value, vence: fe.vence.value, notas: fe.notas.value.trim(), recalcular
+        } }));
+        toast('Cuenta actualizada.', 'ok');
+        reabrir({ cuenta: cu });
+        actualizarAlertasLocales();
+      } catch (e) { msg.textContent = e.message; }
+    };
+    fe.onsubmit = ev => { ev.preventDefault(); guardar(false); };
+    const rc = $('#cx-recalc', d);
+    if (rc) rc.onclick = () => guardar(true);
+  }
+}
+
+function dlgNuevaCuenta() {
+  const provs = CPP.datos.proveedores.filter(p => esActivo(p.activo)).sort(porNombre);
+  const nuevoId = uuid();
+  const d = abrirModal('Nueva cuenta por pagar', `
+    <form id="fnc" class="form">
+      <p class="nota">Para facturas que no vienen de una orden de compra (servicios, fletes, gastos, compras de contado sin orden).</p>
+      <div class="fila2"><label>Proveedor<select name="proveedor_id" required><option value="">Elige…</option>${provs.map(p => `<option value="${esc(p.id)}">${esc(p.nombre)}</option>`).join('')}</select></label>
+        <label>Folio de factura<input name="factura"></label></div>
+      <div class="fila3"><label>Fecha de la factura<input name="fecha" type="date" required value="${hoyLocal()}"></label>
+        <label>Monto total (con IVA)<input name="monto" type="number" step="0.01" min="0.01" required></label>
+        <label>Condición<select name="condicion"><option value="CONTADO">Contado</option><option value="CREDITO">Crédito</option></select></label></div>
+      <div class="fila2"><label id="nc-dias" hidden>Días de crédito<input name="dias_credito" type="number" min="0" step="1" value="0"></label>
+        <label>Vence<input name="vence" type="date" value="${hoyLocal()}"></label></div>
+      <label>Notas<input name="notas"></label>
+      <label class="archivo"><input type="file" name="archivos" multiple accept=".pdf,.xml,.jpg,.jpeg,.png"><span>Adjuntar factura (opcional)</span></label>
+      <p class="msg" id="fnc-msg"></p>
+      <div class="pie"><button type="button" class="btn sec" data-cerrar>Cancelar</button><button class="btn" type="submit">Guardar</button></div>
+    </form>`);
+  const f = $('#fnc', d);
+  const recalc = () => {
+    $('#nc-dias', d).hidden = f.condicion.value !== 'CREDITO';
+    const dias = f.condicion.value === 'CREDITO' ? Number(f.dias_credito.value) || 0 : 0;
+    if (f.fecha.value) f.vence.value = sumarDiasYmd(f.fecha.value, dias);
+  };
+  f.proveedor_id.onchange = () => {
+    const p = provCxp(f.proveedor_id.value);
+    if (Number(p.dias_credito) > 0) { f.condicion.value = 'CREDITO'; f.dias_credito.value = p.dias_credito; } else f.condicion.value = 'CONTADO';
+    recalc();
+  };
+  f.condicion.onchange = recalc;
+  f.dias_credito.oninput = recalc;
+  f.fecha.onchange = recalc;
+  f.archivos.onchange = () => { $('.archivo span', d).textContent = Array.from(f.archivos.files).map(a => a.name).join(', ') || 'Adjuntar factura (opcional)'; };
+  f.onsubmit = async ev => {
+    ev.preventDefault();
+    const msg = $('#fnc-msg', d);
+    msg.textContent = '';
+    try {
+      const archivos = Array.from(f.archivos.files);
+      const cu = await conCarga('Guardando…', async () => {
+        const c = await api('guardarCuenta', { cuenta: {
+          nuevo: true, id: nuevoId, proveedor_id: f.proveedor_id.value, factura: f.factura.value.trim(), fecha_cuenta: f.fecha.value,
+          monto: f.monto.value, condicion: f.condicion.value, dias_credito: f.dias_credito.value, vence: f.vence.value, notas: f.notas.value.trim()
+        } });
+        return archivos.length ? await subirFacturas(c.id, archivos, nuevoId) : c;
+      });
+      aplicarDetalle({ cuenta: cu });
+      cerrarModal();
+      toast('Cuenta registrada.', 'ok');
+      if (CPP.repintar) CPP.repintar();
+      actualizarAlertasLocales();
+    } catch (e) { msg.textContent = e.message; }
+  };
+}
+
+// Recalcula los avisos de Inicio con los datos ya descargados
+function actualizarAlertasLocales() {
+  if (!CPP.datos) return;
+  const hoy = hoyLocal(), lim = hoyLocal(DIAS_AVISO);
+  const r = { por_vencer: 0, monto_por_vencer: 0, vencidas: 0, monto_vencido: 0, dias: DIAS_AVISO };
+  CPP.datos.cuentas.filter(c => Number(c.saldo) > 0.005).forEach(c => {
+    if (String(c.vence) < hoy) { r.vencidas++; r.monto_vencido += Number(c.saldo); }
+    else if (String(c.vence) <= lim) { r.por_vencer++; r.monto_por_vencer += Number(c.saldo); }
+  });
+  S.alertas = r;
+  pintarMenu();
+}
+
+function exportarMes() {
+  const D = CPP.datos, mes = CPP.mes;
+  const prov = id => provCxp(id);
+  const cuentas = D.cuentas.filter(c => String(c.fecha_cuenta).slice(0, 7) === mes).sort((a, b) => String(a.fecha_cuenta).localeCompare(String(b.fecha_cuenta)));
+  const pagos = D.pagos.filter(p => String(p.fecha_pago).slice(0, 7) === mes).sort((a, b) => String(a.fecha_pago).localeCompare(String(b.fecha_pago)));
+  const porId = Object.fromEntries(D.cuentas.map(c => [c.id, c]));
+  const n = v => Math.round((Number(v) || 0) * 100) / 100;
+  const filasC = [['Fecha', 'Proveedor', 'RFC', 'Factura', 'Orden de compra', 'Condición', 'Vence', 'Total', 'Pagado', 'Saldo', 'Estado']]
+    .concat(cuentas.map(c => [String(c.fecha_cuenta).slice(0, 10), prov(c.proveedor_id).nombre || '', prov(c.proveedor_id).rfc || '', c.factura || '',
+      c.folio_oc || 'Manual', condicionTxt(c), String(c.vence), n(c.monto), n(c.pagado), n(c.saldo), CXP_TXT[estadoCuenta(c)]]));
+  filasC.push(['', '', '', '', '', '', 'TOTAL', n(cuentas.reduce((s, c) => s + Number(c.monto), 0)),
+    n(cuentas.reduce((s, c) => s + Number(c.pagado), 0)), n(cuentas.reduce((s, c) => s + Number(c.saldo), 0)), '']);
+  const filasP = [['Fecha de pago', 'Proveedor', 'Factura', 'Orden de compra', 'Método', 'Referencia', 'Monto']]
+    .concat(pagos.map(p => { const c = porId[p.cuenta_id] || {}; return [String(p.fecha_pago), prov(c.proveedor_id).nombre || '', c.factura || '', c.folio_oc || 'Manual', METODO_TXT[p.metodo] || p.metodo, p.referencia || '', n(p.monto)]; }));
+  filasP.push(['', '', '', '', '', 'TOTAL', n(pagos.reduce((s, p) => s + Number(p.monto), 0))]);
+  const saldos = {};
+  D.cuentas.filter(c => Number(c.saldo) > 0.005).forEach(c => {
+    saldos[c.proveedor_id] = saldos[c.proveedor_id] || [0, 0];
+    saldos[c.proveedor_id][0] += Number(c.saldo);
+    if (String(c.vence) < hoyLocal()) saldos[c.proveedor_id][1] += Number(c.saldo);
+  });
+  const filasS = [['Proveedor', 'RFC', 'Saldo vencido', 'Saldo total']]
+    .concat(Object.entries(saldos).sort((a, b) => b[1][0] - a[1][0]).map(([id, v]) => [prov(id).nombre || '', prov(id).rfc || '', n(v[1]), n(v[0])]));
+  const blob = Excel.crearXlsx([
+    { nombre: 'Cuentas del mes', filas: filasC, encabezado: true, anchos: [12, 30, 15, 16, 14, 16, 12, 13, 13, 13, 12], columnasTexto: [2, 3] },
+    { nombre: 'Pagos del mes', filas: filasP, encabezado: true, anchos: [13, 30, 16, 14, 15, 24, 13] },
+    { nombre: 'Saldos al día', filas: filasS, encabezado: true, anchos: [30, 15, 15, 15] }
+  ]);
+  Excel.descargar(blob, `cuentas-por-pagar-${mes}.xlsx`);
 }
 
 /* ---- Almacenes ---- */
