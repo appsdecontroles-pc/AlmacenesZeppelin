@@ -1,11 +1,11 @@
 {
-  "name": "Control de Inventario",
-  "short_name": "Inventario",
+  "name": "Comercial Zeppelin · Inventario",
+  "short_name": "Zeppelin",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
-  "background_color": "#f4f6f5",
-  "theme_color": "#0f766e",
+  "background_color": "#ffffff",
+  "theme_color": "#0172B6",
   "lang": "es-MX",
   "icons": [
     { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },

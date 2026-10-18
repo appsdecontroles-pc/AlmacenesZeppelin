@@ -43,6 +43,21 @@ Reglas:
 - Si se corta el internet a medio importar, puedes reintentar con el mismo archivo: las existencias no se duplican.
 - El formato .xls antiguo no es compatible; guarda como .xlsx o .csv.
 
+## Compras (fase 2)
+
+En **Compras** (administrador general y control de inventarios):
+
+- **Proveedores:** nombre, RFC, contacto, correo y días de crédito.
+- **Órdenes de compra:** folio automático (OC-00001), IVA 0/8/16 %, y un botón que agrega los productos bajo mínimo.
+- **Enviar:** genera el PDF con el logo de la empresa, lo guarda en la carpeta "Órdenes de compra" de Google Drive y, si se elige, lo manda por correo al proveedor. También se puede descargar para enviarlo por otro medio.
+- **Recibir:** se captura lo que llegó; admite entregas parciales. Suma al inventario del almacén y puede actualizar el costo de los productos.
+- **Pedidos programados:** semanal, quincenal o mensual. Cada mañana se crea la orden en borrador o se envía sola por correo.
+- **Tablero:** próximas, enviadas, por recibir (marca las atrasadas) y recibidas del mes.
+
+Los datos de la empresa y el logo del PDF se capturan en **Mi cuenta > Datos de la empresa**.
+
+Al actualizar el servidor a esta versión hay que ejecutar **instalar** otra vez. Crea las hojas nuevas y la tarea diaria, y Google pedirá permisos nuevos para Drive y correo. No borra nada.
+
 ## Cómo funciona sin internet
 
 - Al entrar y cada 15 minutos, la app descarga catálogo, precios y existencias, y los guarda en el equipo.

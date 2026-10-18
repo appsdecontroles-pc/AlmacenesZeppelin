@@ -4,7 +4,7 @@
  * Servidor: Google Apps Script (API) + Google Sheets (base de datos). */
 
 const CFG = Object.assign({ NOMBRE: 'Control de Inventario', SYNC_MINUTOS: 15, API_URL: '' }, window.APP_CONFIG || {});
-const VERSION_APP = '1.1.0';
+const VERSION_APP = '2.0.0';
 
 const ROL_TXT = {
   ADMIN_GENERAL: 'Administrador general',
@@ -118,13 +118,34 @@ function toast(msg, tipo = '') {
   setTimeout(() => t.remove(), 4700);
 }
 
-function abrirModal(titulo, html) {
+function abrirModal(titulo, html, ancho = false) {
   const d = $('#dlg');
+  d.classList.toggle('ancho', ancho);
   d.innerHTML = `<form method="dialog" class="dlg-cab"><h2>${esc(titulo)}</h2><button class="icono" aria-label="Cerrar">✕</button></form><div class="dlg-cuerpo">${html}</div>`;
   if (!d.open) d.showModal();
   return d;
 }
 const cerrarModal = () => { const d = $('#dlg'); if (d.open) d.close(); };
+
+// Pantalla de espera con la animación de la marca
+let cargasActivas = 0;
+function mostrarCarga(texto = 'Cargando…') {
+  cargasActivas++;
+  $('#carga-txt').textContent = texto;
+  $('#carga').classList.remove('oculta');
+  $('#carga').hidden = false;
+}
+function ocultarCarga(forzar = false) {
+  cargasActivas = forzar ? 0 : Math.max(0, cargasActivas - 1);
+  if (cargasActivas) return;
+  $('#carga').classList.add('oculta');
+  setTimeout(() => { if (!cargasActivas) $('#carga').hidden = true; }, 260);
+}
+// Ejecuta una tarea larga mostrando la animación
+async function conCarga(texto, fn) {
+  mostrarCarga(texto);
+  try { return await fn(); } finally { ocultarCarga(); }
+}
 
 /* ---------------- Contraseña local (para entrar sin internet) ---------------- */
 function aleatorioB64(n) {
@@ -225,6 +246,7 @@ function mapaExistencias() {
 
 /* ---------------- Sesión ---------------- */
 async function cargarSesion(ses) {
+  if (!S.usuario || S.usuario.usuario !== ses.usuario.usuario) CMP.datos = null;
   S.token = ses.token;
   S.usuario = ses.usuario;
   const [cat, ex, ver, rolCat, ult, out] = await Promise.all([
@@ -249,6 +271,7 @@ async function onLogin(ev) {
   msg.textContent = '';
   btn.disabled = true;
   btn.textContent = 'Entrando…';
+  mostrarCarga('Entrando…');
   try {
     let ses;
     try {
@@ -276,6 +299,7 @@ async function onLogin(ev) {
   } catch (e) {
     msg.textContent = e.message;
   } finally {
+    ocultarCarga();
     btn.disabled = false;
     btn.textContent = 'Entrar';
   }
@@ -373,6 +397,7 @@ const VISTAS = {
   productos: { titulo: 'Productos', roles: ['ADMIN_GENERAL', 'ADMIN_SUCURSAL', 'INVENTARIOS', 'CAJERO'], render: vProductos },
   inventario: { titulo: 'Inventario', roles: ['ADMIN_GENERAL', 'ADMIN_SUCURSAL', 'INVENTARIOS', 'CAJERO'], render: vInventario },
   movimientos: { titulo: 'Movimientos', roles: ['ADMIN_GENERAL', 'ADMIN_SUCURSAL', 'INVENTARIOS'], render: vMovimientos },
+  compras: { titulo: 'Compras', roles: ['ADMIN_GENERAL', 'INVENTARIOS'], render: vCompras },
   almacenes: { titulo: 'Almacenes', roles: ['ADMIN_GENERAL'], render: vAlmacenes },
   usuarios: { titulo: 'Usuarios', roles: ['ADMIN_GENERAL', 'ADMIN_SUCURSAL'], render: vUsuarios },
   cuenta: { titulo: 'Mi cuenta', roles: null, render: vCuenta }
@@ -1192,6 +1217,613 @@ function vMovimientos(el) {
   };
 }
 
+/* ---- Compras (fase 2) ---- */
+const EST_TXT = {
+  BORRADOR: 'Borrador', ENVIADA: 'Enviada', CONFIRMADA: 'Confirmada', PARCIAL: 'Recibida parcial',
+  RECIBIDA: 'Recibida', CANCELADA: 'Cancelada', ATRASADA: 'Atrasada'
+};
+const FREC_TXT = { SEMANAL: 'Cada semana', QUINCENAL: 'Cada 15 días', MENSUAL: 'Cada mes' };
+const CMP = { datos: null, cargado: 0, offline: false, pestana: 'tablero', filtroEst: '', q: '' };
+
+function hoyLocal(diasMas = 0) {
+  const d = new Date();
+  d.setDate(d.getDate() + diasMas);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+function fechaCorta(ymd) {
+  if (!ymd) return '—';
+  const s = String(ymd).slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return fechaHora(ymd);
+  const [a, m, d] = s.split('-');
+  return `${d}/${m}/${a.slice(2)}`;
+}
+const chipEstado = e => `<span class="est est-${e}">${EST_TXT[e] || e}</span>`;
+const nombreProv = id => ((CMP.datos && CMP.datos.proveedores.find(p => p.id === id)) || {}).nombre || '—';
+const atrasada = o => ['ENVIADA', 'CONFIRMADA', 'PARCIAL'].includes(o.estado) && o.fecha_entrega && o.fecha_entrega < hoyLocal();
+
+async function cargarCompras() {
+  if (!navigator.onLine) {
+    const snap = await DB.get('compras');
+    if (!snap || snap.usuario !== S.usuario.usuario) throw new Error('Sin conexión y sin datos guardados de compras en este equipo.');
+    CMP.datos = snap.datos;
+    CMP.cargado = snap.fecha;
+    CMP.offline = true;
+    return;
+  }
+  CMP.datos = await api('compras');
+  CMP.cargado = Date.now();
+  CMP.offline = false;
+  await DB.set('compras', { datos: CMP.datos, fecha: CMP.cargado, usuario: S.usuario.usuario });
+}
+async function guardarSnapshotCompras() {
+  try { await DB.set('compras', { datos: CMP.datos, fecha: CMP.cargado, usuario: S.usuario.usuario }); } catch (e) { /* sin importancia */ }
+}
+function actualizarOrdenLocal(o) {
+  upsert(CMP.datos.ordenes, o);
+  guardarSnapshotCompras();
+}
+
+function vCompras(el) {
+  el.innerHTML = `
+    <div class="titulo"><h2>Compras</h2><div class="acciones">
+      <button type="button" class="btn sec" id="c-recargar">Actualizar</button>
+      <button type="button" class="btn" id="c-nueva">Nueva orden</button></div></div>
+    <div class="segmentos" id="c-tabs">
+      ${[['tablero', 'Tablero'], ['ordenes', 'Órdenes'], ['programadas', 'Programadas'], ['proveedores', 'Proveedores']]
+        .map(([k, t]) => `<button type="button" data-t="${k}">${t}</button>`).join('')}
+    </div>
+    <div id="c-aviso"></div>
+    <div id="c-cuerpo"><p class="nota">Cargando…</p></div>`;
+  const cuerpo = $('#c-cuerpo', el);
+
+  const pintar = () => {
+    $$('#c-tabs button', el).forEach(b => b.classList.toggle('activo', b.dataset.t === CMP.pestana));
+    $('#c-aviso', el).innerHTML = CMP.offline
+      ? `<p class="aviso-offline">Sin conexión: mostrando los datos de compras de ${hace(CMP.cargado)}. Solo consulta.</p>` : '';
+    if (!CMP.datos) return;
+    ({ tablero: pintarTablero, ordenes: pintarOrdenes, programadas: pintarProgramadas, proveedores: pintarProveedores })[CMP.pestana](cuerpo);
+  };
+  const recargar = async (conAnimacion) => {
+    try {
+      if (conAnimacion) await conCarga('Cargando compras…', cargarCompras);
+      else await cargarCompras();
+      pintar();
+    } catch (e) {
+      cuerpo.innerHTML = `<p class="txt-error">${esc(e.message)}</p>`;
+      if (e.sesion) sesionVencida(e.message);
+    }
+  };
+  S.refrescar = pintar;
+  CMP.repintar = pintar;
+  $('#c-tabs', el).onclick = e => {
+    const b = e.target.closest('[data-t]');
+    if (b) { CMP.pestana = b.dataset.t; pintar(); }
+  };
+  $('#c-recargar', el).onclick = () => recargar(true);
+  $('#c-nueva', el).onclick = () => CMP.datos && dlgEditorOrden(null);
+  if (CMP.datos) pintar();
+  if (!CMP.datos || Date.now() - CMP.cargado > 60000 || (CMP.offline && navigator.onLine)) recargar(!CMP.datos);
+}
+
+function tarjetaOrden(o) {
+  const tarde = atrasada(o);
+  return `<button type="button" class="oc ${tarde ? 'atrasada' : ''}" data-oc="${esc(o.id)}">
+    <span class="fila-oc"><span class="folio">${esc(o.folio)}</span>${tarde ? chipEstado('ATRASADA') : chipEstado(o.estado)}</span>
+    <span>${esc(nombreProv(o.proveedor_id))}</span>
+    <span class="fila-oc"><small>${o.fecha_entrega ? 'Entrega ' + fechaCorta(o.fecha_entrega) : 'Sin fecha de entrega'}</small><b>${dinero(o.total)}</b></span>
+  </button>`;
+}
+
+function pintarTablero(c) {
+  const D = CMP.datos;
+  const hoy = hoyLocal(), en7 = hoyLocal(7), mes = hoy.slice(0, 7);
+  const borradores = D.ordenes.filter(o => o.estado === 'BORRADOR');
+  const proximas = D.programadas.filter(p => esActivo(p.activo) && p.proxima <= en7).sort((a, b) => (a.proxima < b.proxima ? -1 : 1));
+  const enviadas = D.ordenes.filter(o => o.estado === 'ENVIADA');
+  const recibir = D.ordenes.filter(o => ['CONFIRMADA', 'PARCIAL'].includes(o.estado))
+    .sort((a, b) => String(a.fecha_entrega || '9').localeCompare(String(b.fecha_entrega || '9')));
+  const recibidas = D.ordenes.filter(o => o.estado === 'RECIBIDA' && String(o.recibida).slice(0, 7) >= mes)
+    .sort((a, b) => (String(a.recibida) < String(b.recibida) ? 1 : -1));
+  const suma = l => dinero(l.reduce((s, o) => s + (Number(o.total) || 0), 0));
+  const col = (clase, titulo, lista, html, vacio) => `<section class="columna ${clase}">
+    <header><b>${titulo} (${lista.length})</b><small>${suma(lista.filter(x => x.folio))}</small></header>
+    ${html || `<p class="nota">${vacio}</p>`}</section>`;
+  c.innerHTML = `<div class="tablero">
+    ${col('c-proximas', 'Próximas', borradores, borradores.map(tarjetaOrden).join('') + proximas.map(p => `
+      <button type="button" class="oc programada" data-prg="${esc(p.id)}">
+        <span class="fila-oc"><span class="folio">${esc(p.nombre)}</span><span class="est est-BORRADOR">Programada</span></span>
+        <span>${esc(nombreProv(p.proveedor_id))}</span>
+        <span class="fila-oc"><small>${p.proxima <= hoy ? 'Hoy' : fechaCorta(p.proxima)} · ${p.accion === 'ENVIAR' ? 'se envía sola' : 'se crea borrador'}</small></span>
+      </button>`).join(''), 'Sin borradores ni pedidos programados esta semana.')}
+    ${col('c-enviadas', 'Enviadas', enviadas, enviadas.map(tarjetaOrden).join(''), 'Esperando confirmación del proveedor.')}
+    ${col('c-recibir', 'Por recibir', recibir, recibir.map(tarjetaOrden).join(''), 'Nada pendiente de recibir.')}
+    ${col('c-recibidas', 'Recibidas este mes', recibidas, recibidas.map(tarjetaOrden).join(''), 'Aún no hay recepciones este mes.')}
+  </div>`;
+  c.onclick = e => {
+    const b = e.target.closest('[data-oc]');
+    const p = e.target.closest('[data-prg]');
+    if (b) dlgOrden(D.ordenes.find(o => o.id === b.dataset.oc));
+    if (p) dlgEditorOrden(D.programadas.find(x => x.id === p.dataset.prg), 'programada');
+  };
+}
+
+function pintarOrdenes(c) {
+  const D = CMP.datos;
+  const q = normal(CMP.q);
+  const l = D.ordenes
+    .filter(o => (!CMP.filtroEst || o.estado === CMP.filtroEst) && (!q || normal(o.folio + ' ' + nombreProv(o.proveedor_id)).includes(q)))
+    .sort((a, b) => (String(a.folio) < String(b.folio) ? 1 : -1));
+  c.innerHTML = `<div class="filtros">
+      <input id="c-q" type="search" placeholder="Buscar folio o proveedor" value="${esc(CMP.q)}">
+      <select id="c-est"><option value="">Todos los estados</option>${Object.keys(EST_TXT).filter(k => k !== 'ATRASADA')
+        .map(k => `<option value="${k}" ${CMP.filtroEst === k ? 'selected' : ''}>${EST_TXT[k]}</option>`).join('')}</select>
+    </div>
+    ${l.length ? `<div class="tabla-cont"><table class="tabla"><thead><tr><th>Folio</th><th>Proveedor</th><th>Estado</th><th>Fecha</th><th>Entrega</th><th class="num">Total</th></tr></thead>
+      <tbody>${l.map(o => `<tr class="clic" data-oc="${esc(o.id)}"><td><b>${esc(o.folio)}</b></td><td>${esc(nombreProv(o.proveedor_id))}</td>
+        <td>${atrasada(o) ? chipEstado('ATRASADA') : chipEstado(o.estado)}</td><td>${fechaCorta(o.fecha)}</td><td>${fechaCorta(o.fecha_entrega)}</td>
+        <td class="num">${dinero(o.total)}</td></tr>`).join('')}</tbody></table></div>
+      <p class="nota">Se muestran las órdenes abiertas y las cerradas de los últimos 4 meses.</p>`
+      : '<p class="vacio">No hay órdenes con esos filtros.</p>'}`;
+  const qi = $('#c-q', c);
+  qi.oninput = () => { CMP.q = qi.value; const pos = qi.selectionStart; pintarOrdenes(c); const n = $('#c-q', c); n.focus(); n.setSelectionRange(pos, pos); };
+  $('#c-est', c).onchange = e => { CMP.filtroEst = e.target.value; pintarOrdenes(c); };
+  c.onclick = e => {
+    const tr = e.target.closest('[data-oc]');
+    if (tr) dlgOrden(D.ordenes.find(o => o.id === tr.dataset.oc));
+  };
+}
+
+function pintarProgramadas(c) {
+  const D = CMP.datos;
+  c.innerHTML = `<div class="titulo"><p class="nota">Cada mañana se generan solas las órdenes de los pedidos cuya fecha llegó.</p>
+      <button type="button" class="btn sec" id="c-nprg">Nuevo pedido programado</button></div>
+    ${D.programadas.length ? `<div class="tabla-cont"><table class="tabla"><thead><tr><th>Nombre</th><th>Proveedor</th><th>Frecuencia</th><th>Siguiente</th><th>Al llegar la fecha</th><th class="num">Total aprox.</th><th></th></tr></thead>
+      <tbody>${D.programadas.map(p => {
+        const t = (p.lineas || []).reduce((s, l) => s + l.cantidad * l.costo, 0) * (1 + (Number(p.iva_tasa) || 0) / 100);
+        return `<tr class="clic ${esActivo(p.activo) ? '' : 'inactivo'}" data-prg="${esc(p.id)}"><td><b>${esc(p.nombre)}</b></td>
+          <td>${esc(nombreProv(p.proveedor_id))}</td><td>${FREC_TXT[p.frecuencia] || p.frecuencia}</td><td>${esActivo(p.activo) ? fechaCorta(p.proxima) : 'Pausado'}</td>
+          <td>${p.accion === 'ENVIAR' ? 'Crear y enviar por correo' : 'Crear borrador'}</td><td class="num">${dinero(t)}</td>
+          <td><button type="button" class="btn mini sec" data-ahora="${esc(p.id)}">Crear ahora</button></td></tr>`;
+      }).join('')}</tbody></table></div>` : '<p class="vacio">No hay pedidos programados.</p>'}`;
+  $('#c-nprg', c).onclick = () => dlgEditorOrden(null, 'programada');
+  c.onclick = async e => {
+    const ahora = e.target.closest('[data-ahora]');
+    if (ahora) {
+      e.stopPropagation();
+      try {
+        const o = await conCarga('Creando orden…', () => api('generarProgramada', { id: ahora.dataset.ahora }));
+        actualizarOrdenLocal(o);
+        toast(`Orden ${o.folio} creada en borrador.`, 'ok');
+        dlgOrden(o);
+      } catch (err) { toast(err.message, 'error'); }
+      return;
+    }
+    const tr = e.target.closest('[data-prg]');
+    if (tr) dlgEditorOrden(D.programadas.find(p => p.id === tr.dataset.prg), 'programada');
+  };
+}
+
+function pintarProveedores(c) {
+  const D = CMP.datos;
+  c.innerHTML = `<div class="titulo"><span></span><button type="button" class="btn sec" id="c-nprov">Nuevo proveedor</button></div>
+    ${D.proveedores.length ? `<div class="tabla-cont"><table class="tabla"><thead><tr><th>Proveedor</th><th>Contacto</th><th>Teléfono</th><th>Correo</th><th class="num">Crédito</th></tr></thead>
+      <tbody>${D.proveedores.slice().sort(porNombre).map(p => `<tr class="clic ${esActivo(p.activo) ? '' : 'inactivo'}" data-prov="${esc(p.id)}">
+        <td><b>${esc(p.nombre)}</b>${p.rfc ? `<small>${esc(p.rfc)}</small>` : ''}</td><td>${esc(p.contacto || '—')}</td><td>${esc(p.telefono || '—')}</td>
+        <td>${esc(p.email || '—')}</td><td class="num">${Number(p.dias_credito) ? p.dias_credito + ' días' : 'Contado'}</td></tr>`).join('')}</tbody></table></div>`
+      : '<p class="vacio">Registra tu primer proveedor para crear órdenes de compra.</p>'}`;
+  $('#c-nprov', c).onclick = () => dlgProveedor(null);
+  c.onclick = e => {
+    const tr = e.target.closest('[data-prov]');
+    if (tr) dlgProveedor(D.proveedores.find(p => p.id === tr.dataset.prov));
+  };
+}
+
+function dlgProveedor(p, alGuardar) {
+  const nuevo = !p;
+  p = p || { activo: true, dias_credito: 0 };
+  const d = abrirModal(nuevo ? 'Nuevo proveedor' : 'Editar proveedor', `
+    <form id="fprov" class="form">
+      <div class="fila2"><label>Nombre o razón social<input name="nombre" required value="${esc(p.nombre || '')}"></label>
+        <label>RFC<input name="rfc" value="${esc(p.rfc || '')}" autocapitalize="characters"></label></div>
+      <div class="fila3"><label>Contacto<input name="contacto" value="${esc(p.contacto || '')}"></label>
+        <label>Teléfono<input name="telefono" type="tel" value="${esc(p.telefono || '')}"></label>
+        <label>Correo (para enviar órdenes)<input name="email" type="email" value="${esc(p.email || '')}"></label></div>
+      <div class="fila2"><label>Días de crédito (0 = contado)<input name="dias_credito" type="number" min="0" step="1" value="${esc(p.dias_credito || 0)}"></label>
+        <label class="chk"><input type="checkbox" name="activo" ${esActivo(p.activo) ? 'checked' : ''}> Activo</label></div>
+      <label>Notas<input name="notas" value="${esc(p.notas || '')}"></label>
+      <p class="msg" id="fprov-msg"></p>
+      <div class="pie"><button type="button" class="btn sec" data-cerrar>Cancelar</button><button class="btn" type="submit">Guardar</button></div>
+    </form>`);
+  const f = $('#fprov', d);
+  f.onsubmit = async ev => {
+    ev.preventDefault();
+    const msg = $('#fprov-msg', d);
+    msg.textContent = 'Guardando…';
+    try {
+      const r = await api('guardarProveedor', { proveedor: {
+        id: p.id || '', nombre: f.nombre.value, rfc: f.rfc.value, contacto: f.contacto.value, telefono: f.telefono.value,
+        email: f.email.value, dias_credito: f.dias_credito.value, notas: f.notas.value, activo: f.activo.checked
+      } });
+      upsert(CMP.datos.proveedores, r);
+      guardarSnapshotCompras();
+      cerrarModal();
+      toast('Proveedor guardado.', 'ok');
+      if (alGuardar) alGuardar(r); else if (CMP.repintar) CMP.repintar();
+    } catch (e) { msg.textContent = e.message; }
+  };
+}
+
+// Editor de orden de compra o de pedido programado
+function dlgEditorOrden(base, modo = 'orden') {
+  const esProg = modo === 'programada';
+  const nuevo = !base;
+  const D = CMP.datos;
+  const almsDestino = almacenesVisibles();
+  const almDef = (almsDestino.find(a => a.tipo === 'BODEGA') || almsDestino[0] || {}).id || '';
+  const o = base ? JSON.parse(JSON.stringify(base)) : {
+    proveedor_id: '', almacen_id: almDef, iva_tasa: 16, fecha_entrega: esProg ? '' : hoyLocal(3), notas: '', lineas: [],
+    frecuencia: 'SEMANAL', proxima: hoyLocal(7), accion: 'BORRADOR', activo: true, nombre: ''
+  };
+  const lineas = (o.lineas || []).map(l => ({ producto_id: l.producto_id, cantidad: Number(l.cantidad), costo: Number(l.costo) }));
+  const provs = D.proveedores.filter(p => esActivo(p.activo) || p.id === o.proveedor_id).sort(porNombre);
+  const titulo = esProg ? (nuevo ? 'Nuevo pedido programado' : 'Pedido programado') : (nuevo ? 'Nueva orden de compra' : `Editar ${o.folio}`);
+  const d = abrirModal(titulo, `
+    <form id="feo" class="form" autocomplete="off">
+      ${esProg ? `<div class="fila3">
+        <label>Nombre del pedido<input name="nombre" required value="${esc(o.nombre || '')}" placeholder="Ej. Abarrotes semanal"></label>
+        <label>Frecuencia<select name="frecuencia">${Object.keys(FREC_TXT).map(k => `<option value="${k}" ${o.frecuencia === k ? 'selected' : ''}>${FREC_TXT[k]}</option>`).join('')}</select></label>
+        <label>Siguiente pedido<input name="proxima" type="date" required value="${esc(o.proxima || '')}"></label></div>
+        <div class="fila2"><label>Al llegar la fecha<select name="accion">
+          <option value="BORRADOR" ${o.accion !== 'ENVIAR' ? 'selected' : ''}>Crear la orden en borrador para revisarla</option>
+          <option value="ENVIAR" ${o.accion === 'ENVIAR' ? 'selected' : ''}>Crearla y enviarla por correo al proveedor</option></select></label>
+          <label class="chk"><input type="checkbox" name="activo" ${esActivo(o.activo) ? 'checked' : ''}> Activo</label></div>` : ''}
+      <div class="fila3">
+        <label>Proveedor<span class="fila-form"><select name="proveedor_id" required><option value="">Elige…</option>${provs.map(p => `<option value="${esc(p.id)}" ${p.id === o.proveedor_id ? 'selected' : ''}>${esc(p.nombre)}</option>`).join('')}</select>
+          <button type="button" class="btn sec mini" id="feo-nprov" title="Nuevo proveedor">+</button></span></label>
+        <label>Recibe en<select name="almacen_id">${almsDestino.map(a => `<option value="${esc(a.id)}" ${a.id === o.almacen_id ? 'selected' : ''}>${esc(a.nombre)}</option>`).join('')}</select></label>
+        ${esProg ? '' : `<label>Fecha de entrega<input name="fecha_entrega" type="date" value="${esc(o.fecha_entrega || '')}"></label>`}
+      </div>
+      <div class="campo"><span>Agregar producto</span><div id="feo-sel"></div></div>
+      <div class="acciones"><button type="button" class="btn sec mini" id="feo-sugerir">Agregar productos bajo mínimo</button></div>
+      <div id="feo-lineas"></div>
+      <div class="fila2"><label>IVA<select name="iva_tasa">${[0, 8, 16].map(t => `<option value="${t}" ${Number(o.iva_tasa) === t ? 'selected' : ''}>${t}%</option>`).join('')}</select></label>
+        <label>Notas para el proveedor<input name="notas" value="${esc(o.notas || '')}"></label></div>
+      <div class="totales" id="feo-tot"></div>
+      <p class="msg" id="feo-msg"></p>
+      <div class="pie"><button type="button" class="btn sec" data-cerrar>Cancelar</button>
+        ${esProg ? '<button class="btn" type="submit" data-accion="guardar">Guardar pedido programado</button>'
+          : `<button class="btn sec" type="submit" data-accion="guardar">Guardar borrador</button><button class="btn" type="submit" data-accion="enviar">Guardar y enviar…</button>`}</div>
+    </form>`, true);
+  const f = $('#feo', d);
+  const msg = $('#feo-msg', d);
+
+  const pintarLineas = () => {
+    const ex = mapaExistencias();
+    $('#feo-lineas', d).innerHTML = lineas.length ? `<div class="tabla-cont"><table class="tabla lineas-oc"><thead><tr>
+        <th>Producto</th><th class="num">Existencia</th><th class="num">Cantidad</th><th class="num">Costo unit.</th><th class="num">Importe</th><th></th></tr></thead>
+      <tbody>${lineas.map((l, i) => {
+        const p = S.idx.prod[l.producto_id] || {};
+        return `<tr><td>${esc(p.nombre || 'Producto no disponible')}<small>${esc(p.codigo || '')} · ${esc(p.unidad || '')}</small></td>
+          <td class="num">${numero(ex[f.almacen_id.value + '|' + l.producto_id] || 0)}</td>
+          <td class="num"><input type="number" min="0" step="any" data-i="${i}" data-k="cantidad" value="${l.cantidad}"></td>
+          <td class="num"><input type="number" min="0" step="0.01" data-i="${i}" data-k="costo" value="${l.costo}"></td>
+          <td class="num">${dinero(l.cantidad * l.costo)}</td>
+          <td><button type="button" class="btn mini peligro" data-quitar="${i}" title="Quitar">✕</button></td></tr>`;
+      }).join('')}</tbody></table></div>` : '<p class="nota">Aún no hay productos en la orden.</p>';
+    pintarTotales();
+  };
+  const pintarTotales = () => {
+    const sub = lineas.reduce((s, l) => s + (Number(l.cantidad) || 0) * (Number(l.costo) || 0), 0);
+    const tasa = Number(f.iva_tasa.value) || 0;
+    const iva = Math.round(sub * tasa) / 100;
+    $('#feo-tot', d).innerHTML = `<span>Subtotal</span><span class="num">${dinero(sub)}</span><span>IVA ${tasa}%</span><span>${dinero(iva)}</span>
+      <span class="g">Total</span><span class="g">${dinero(sub + iva)}</span>`;
+  };
+  const agregar = (p, cantidad = 1) => {
+    const ya = lineas.find(l => l.producto_id === p.id);
+    if (ya) ya.cantidad += cantidad;
+    else lineas.push({ producto_id: p.id, cantidad, costo: Number(p.costo) || 0 });
+    pintarLineas();
+  };
+  const sel = selectorProducto($('#feo-sel', d), p => {
+    if (!p) return;
+    agregar(p);
+    sel.limpiar();
+    const inp = d.querySelector(`[data-i="${lineas.findIndex(l => l.producto_id === p.id)}"][data-k="cantidad"]`);
+    if (inp) { inp.focus(); inp.select(); }
+  });
+  pintarLineas();
+
+  $('#feo-lineas', d).oninput = e => {
+    const i = e.target.dataset.i;
+    if (i === undefined) return;
+    lineas[i][e.target.dataset.k] = Number(e.target.value) || 0;
+    const fila = e.target.closest('tr');
+    fila.cells[4].textContent = dinero(lineas[i].cantidad * lineas[i].costo);
+    pintarTotales();
+  };
+  $('#feo-lineas', d).onclick = e => {
+    const q = e.target.closest('[data-quitar]');
+    if (q) { lineas.splice(Number(q.dataset.quitar), 1); pintarLineas(); }
+  };
+  f.iva_tasa.onchange = pintarTotales;
+  f.almacen_id.onchange = pintarLineas;
+  $('#feo-sugerir', d).onclick = () => {
+    const ex = mapaExistencias();
+    let n = 0;
+    S.catalogo.productos.filter(p => esActivo(p.activo) && Number(p.stock_minimo) > 0).forEach(p => {
+      const c = ex[f.almacen_id.value + '|' + p.id] || 0;
+      const min = Number(p.stock_minimo);
+      if (c < min && !lineas.some(l => l.producto_id === p.id)) {
+        lineas.push({ producto_id: p.id, cantidad: Math.ceil(Math.max(min * 2 - c, min)), costo: Number(p.costo) || 0 });
+        n++;
+      }
+    });
+    pintarLineas();
+    toast(n ? `Se agregaron ${n} productos bajo mínimo (cantidad para llegar al doble del mínimo).` : 'No hay productos bajo mínimo en ese almacén.', n ? 'ok' : '');
+  };
+  $('#feo-nprov', d).onclick = () => {
+    // Guarda lo capturado, abre el alta de proveedor y regresa a esta orden
+    const copia = Object.assign({}, o, leerForm(), { lineas: lineas.slice() });
+    dlgProveedor(null, prov => dlgEditorOrden(Object.assign(copia, { proveedor_id: prov.id }), modo));
+  };
+  function leerForm() {
+    const r = {
+      proveedor_id: f.proveedor_id.value, almacen_id: f.almacen_id.value, iva_tasa: Number(f.iva_tasa.value),
+      notas: f.notas.value.trim(), fecha_entrega: f.fecha_entrega ? f.fecha_entrega.value : ''
+    };
+    if (esProg) Object.assign(r, { nombre: f.nombre.value.trim(), frecuencia: f.frecuencia.value, proxima: f.proxima.value, accion: f.accion.value, activo: f.activo.checked });
+    return r;
+  }
+
+  f.onsubmit = async ev => {
+    ev.preventDefault();
+    const accion = (ev.submitter && ev.submitter.dataset.accion) || 'guardar';
+    const datos = Object.assign(leerForm(), { lineas: lineas.filter(l => l.cantidad > 0) });
+    if (!datos.proveedor_id) { msg.textContent = 'Elige un proveedor.'; return; }
+    if (!datos.lineas.length) { msg.textContent = 'Agrega al menos un producto con cantidad.'; return; }
+    msg.textContent = '';
+    try {
+      if (esProg) {
+        datos.id = o.id || '';
+        const r = await conCarga('Guardando…', () => api('guardarProgramada', { programada: datos }));
+        upsert(D.programadas, r);
+        guardarSnapshotCompras();
+        cerrarModal();
+        toast('Pedido programado guardado.', 'ok');
+      } else {
+        if (nuevo && !o.id) o.id = uuid();
+        datos.id = o.id;
+        datos.nuevo = nuevo;
+        const r = await conCarga('Guardando orden…', () => api('guardarOrden', { orden: datos }));
+        actualizarOrdenLocal(r);
+        cerrarModal();
+        toast(`Orden ${r.folio} guardada.`, 'ok');
+        if (accion === 'enviar') dlgEnviar(r);
+      }
+      if (CMP.repintar) CMP.repintar();
+    } catch (e) {
+      msg.textContent = e.message;
+      if (e.sesion) { cerrarModal(); sesionVencida(e.message); }
+    }
+  };
+}
+
+function dlgOrden(o) {
+  if (!o) return;
+  const D = CMP.datos;
+  const prov = D.proveedores.find(p => p.id === o.proveedor_id) || {};
+  const alm = S.idx.alm[o.almacen_id] || {};
+  const tarde = atrasada(o);
+  const botones = [];
+  if (o.estado === 'BORRADOR') botones.push(['editar', 'Editar', 'sec'], ['enviar', 'Enviar al proveedor…', '']);
+  if (o.estado === 'ENVIADA') botones.push(['confirmar', 'Proveedor confirmó', 'sec']);
+  if (['ENVIADA', 'CONFIRMADA', 'PARCIAL'].includes(o.estado)) botones.push(['recibir', o.estado === 'PARCIAL' ? 'Recibir lo pendiente' : 'Recibir mercancía', '']);
+  if (['ENVIADA', 'CONFIRMADA'].includes(o.estado)) botones.push(['reenviar', 'Reenviar…', 'sec'], ['borrador', 'Volver a borrador', 'sec']);
+  botones.push(['pdf', 'Descargar PDF', 'sec']);
+  if (['BORRADOR', 'ENVIADA', 'CONFIRMADA'].includes(o.estado)) botones.push(['cancelar', 'Cancelar orden', 'peligro']);
+  const d = abrirModal(`Orden ${o.folio}`, `
+    <div class="form">
+      <div class="titulo"><span>${tarde ? chipEstado('ATRASADA') + ' ' : ''}${chipEstado(o.estado)}</span><b>${dinero(o.total)}</b></div>
+      <div class="info-oc">
+        <div><h4>Proveedor</h4><b>${esc(prov.nombre || '—')}</b><br>${esc(prov.contacto || '')}${prov.email ? '<br>' + esc(prov.email) : ''}${prov.telefono ? '<br>' + esc(prov.telefono) : ''}</div>
+        <div><h4>Recibe</h4><b>${esc(alm.nombre || '—')}</b><br>Entrega: ${fechaCorta(o.fecha_entrega)}${prov.dias_credito ? `<br>Crédito: ${prov.dias_credito} días` : ''}</div>
+        <div><h4>Seguimiento</h4>Creada: ${fechaHora(o.fecha)}${o.enviada ? '<br>Enviada: ' + fechaHora(o.enviada) : ''}${o.confirmada ? '<br>Confirmada: ' + fechaHora(o.confirmada) : ''}${o.recibida ? '<br>Recibida: ' + fechaHora(o.recibida) : ''}${o.cancelada ? '<br>Cancelada: ' + fechaHora(o.cancelada) : ''}</div>
+      </div>
+      <div class="tabla-cont"><table class="tabla"><thead><tr><th>Producto</th><th class="num">Pedido</th><th class="num">Recibido</th><th class="num">Costo</th><th class="num">Importe</th></tr></thead>
+        <tbody>${o.lineas.map(l => {
+          const p = S.idx.prod[l.producto_id] || {};
+          const falta = Number(l.recibido) < Number(l.cantidad) && ['PARCIAL', 'CONFIRMADA', 'ENVIADA'].includes(o.estado);
+          return `<tr><td>${esc(p.nombre || '—')}<small>${esc(p.codigo || '')}</small></td><td class="num">${numero(l.cantidad)} ${esc(p.unidad || '')}</td>
+            <td class="num ${falta && Number(l.recibido) > 0 ? 'txt-error' : ''}">${numero(l.recibido)}</td><td class="num">${dinero(l.costo)}</td>
+            <td class="num">${dinero(l.cantidad * l.costo)}</td></tr>`;
+        }).join('')}</tbody></table></div>
+      <div class="totales"><span>Subtotal</span><span>${dinero(o.subtotal)}</span><span>IVA ${Number(o.iva_tasa)}%</span><span>${dinero(o.iva)}</span>
+        <span class="g">Total</span><span class="g">${dinero(o.total)}</span></div>
+      ${o.notas ? `<p><b>Notas:</b> ${esc(o.notas)}</p>` : ''}
+      <div class="acciones" id="oc-acc">${botones.map(([k, t, c]) => `<button type="button" class="btn ${c}" data-a="${k}">${t}</button>`).join('')}</div>
+    </div>`, true);
+
+  $('#oc-acc', d).onclick = async e => {
+    const b = e.target.closest('[data-a]');
+    if (!b) return;
+    const a = b.dataset.a;
+    try {
+      if (a === 'editar') return dlgEditorOrden(o);
+      if (a === 'enviar' || a === 'reenviar') return dlgEnviar(o);
+      if (a === 'recibir') return dlgRecibir(o);
+      if (a === 'pdf') return descargarPdfOrden(o);
+      const estado = { confirmar: 'CONFIRMADA', borrador: 'BORRADOR', cancelar: 'CANCELADA' }[a];
+      if (a === 'cancelar' && !confirm(`¿Cancelar la orden ${o.folio}?`)) return;
+      const r = await conCarga('Actualizando…', () => api('estadoOrden', { id: o.id, estado }));
+      actualizarOrdenLocal(r);
+      toast(`Orden ${r.folio}: ${EST_TXT[r.estado].toLowerCase()}.`, 'ok');
+      if (CMP.repintar) CMP.repintar();
+      dlgOrden(r);
+    } catch (err) {
+      toast(err.message, 'error');
+      if (err.sesion) { cerrarModal(); sesionVencida(err.message); }
+    }
+  };
+}
+
+async function descargarPdfOrden(o) {
+  try {
+    const r = await conCarga('Generando PDF…', () => api('pdfOrden', { id: o.id }));
+    const bytes = Uint8Array.from(atob(r.base64), c => c.charCodeAt(0));
+    Excel.descargar(new Blob([bytes], { type: 'application/pdf' }), r.nombre);
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+function dlgEnviar(o) {
+  const prov = CMP.datos.proveedores.find(p => p.id === o.proveedor_id) || {};
+  const d = abrirModal(`Enviar ${o.folio}`, `
+    <form id="fenv" class="form">
+      <p>Se genera el PDF de la orden y queda guardado en la carpeta "Órdenes de compra" de tu Google Drive.</p>
+      <label class="chk"><input type="checkbox" name="correo" ${prov.email ? 'checked' : ''}> Enviar por correo al proveedor</label>
+      <label>Correo<input name="para" type="email" value="${esc(prov.email || '')}" placeholder="correo@proveedor.com"></label>
+      <label class="chk"><input type="checkbox" name="descargar" ${prov.email ? '' : 'checked'}> Descargar el PDF en este equipo (para mandarlo por WhatsApp u otro medio)</label>
+      <p class="msg" id="fenv-msg"></p>
+      <div class="pie"><button type="button" class="btn sec" data-cerrar>Cancelar</button><button class="btn" type="submit">Enviar</button></div>
+    </form>`);
+  const f = $('#fenv', d);
+  f.onsubmit = async ev => {
+    ev.preventDefault();
+    const msg = $('#fenv-msg', d);
+    if (f.correo.checked && !f.para.value.trim()) { msg.textContent = 'Escribe el correo del proveedor.'; return; }
+    msg.textContent = '';
+    try {
+      const r = await conCarga(f.correo.checked ? 'Generando y enviando…' : 'Generando PDF…',
+        () => api('enviarOrden', { id: o.id, correo: f.correo.checked, para: f.para.value.trim() }));
+      actualizarOrdenLocal(r.orden);
+      cerrarModal();
+      toast(r.correo ? `Orden ${r.orden.folio} enviada a ${r.correo}.` : `Orden ${r.orden.folio} marcada como enviada.`, 'ok');
+      if (f.descargar.checked) await descargarPdfOrden(r.orden);
+      if (CMP.repintar) CMP.repintar();
+    } catch (e) {
+      msg.textContent = e.message;
+      if (e.sesion) { cerrarModal(); sesionVencida(e.message); }
+    }
+  };
+}
+
+function dlgRecibir(o) {
+  const recepcionId = uuid();
+  const pendientes = o.lineas.map(l => ({ l, pend: Math.max(0, Number(l.cantidad) - Number(l.recibido || 0)) }));
+  const d = abrirModal(`Recibir ${o.folio}`, `
+    <form id="frec" class="form" autocomplete="off">
+      <p class="nota">Captura lo que llegó físicamente. Si falta algo, la orden queda como "Recibida parcial" para recibir el resto después.</p>
+      <div class="tabla-cont"><table class="tabla lineas-oc"><thead><tr><th>Producto</th><th class="num">Pendiente</th><th class="num">Llegó</th><th class="num">Costo unit.</th></tr></thead>
+        <tbody>${pendientes.map(({ l, pend }, i) => {
+          const p = S.idx.prod[l.producto_id] || {};
+          return `<tr><td>${esc(p.nombre || '—')}<small>${esc(p.codigo || '')}</small></td><td class="num">${numero(pend)} ${esc(p.unidad || '')}</td>
+            <td class="num"><input type="number" min="0" step="any" data-i="${i}" data-k="cantidad" value="${pend}"></td>
+            <td class="num"><input type="number" min="0" step="0.01" data-i="${i}" data-k="costo" value="${l.costo}"></td></tr>`;
+        }).join('')}</tbody></table></div>
+      <div class="fila2"><label>Folio de factura o remisión<input name="factura"></label><label>Notas<input name="notas"></label></div>
+      <label class="chk"><input type="checkbox" name="actualizar" checked> Actualizar el costo de los productos con el costo recibido</label>
+      <p class="msg" id="frec-msg"></p>
+      <div class="pie"><button type="button" class="btn sec" data-cerrar>Cancelar</button><button class="btn" type="submit">Registrar recepción</button></div>
+    </form>`, true);
+  const f = $('#frec', d);
+  f.onsubmit = async ev => {
+    ev.preventDefault();
+    const msg = $('#frec-msg', d);
+    const lineas = pendientes.map(({ l, pend }, i) => ({
+      linea_id: l.id, pend,
+      cantidad: Number(f.querySelector(`[data-i="${i}"][data-k="cantidad"]`).value) || 0,
+      costo: f.querySelector(`[data-i="${i}"][data-k="costo"]`).value
+    })).filter(x => x.cantidad > 0);
+    if (!lineas.length) { msg.textContent = 'Captura al menos una cantidad recibida.'; return; }
+    const demas = lineas.filter(x => x.cantidad > x.pend);
+    if (demas.length && !confirm('Algunas cantidades son mayores a lo pendiente. ¿Registrar de todos modos?')) return;
+    msg.textContent = '';
+    try {
+      const r = await conCarga('Registrando recepción…', () => api('recibirOrden', {
+        id: o.id, recepcion_id: recepcionId, factura: f.factura.value.trim(), notas: f.notas.value.trim(),
+        actualizar_costo: f.actualizar.checked, lineas: lineas.map(({ linea_id, cantidad, costo }) => ({ linea_id, cantidad, costo }))
+      }));
+      actualizarOrdenLocal(r.orden);
+      cerrarModal();
+      toast(r.orden.estado === 'RECIBIDA' ? `${r.orden.folio} recibida completa. Inventario actualizado.` : `${r.orden.folio}: recepción parcial registrada.`, 'ok');
+      if (CMP.repintar) CMP.repintar();
+      sincronizar();
+    } catch (e) {
+      msg.textContent = e.message + (e.red ? ' Puedes volver a intentar: no se duplicará.' : '');
+      if (e.sesion) { cerrarModal(); sesionVencida(e.message); }
+    }
+  };
+}
+
+/* ---- Datos de la empresa ---- */
+async function dlgEmpresa() {
+  let emp;
+  try { emp = await conCarga('Cargando…', () => api('empresa')); } catch (e) { toast(e.message, 'error'); return; }
+  let logo = emp.logo || '';
+  const d = abrirModal('Datos de la empresa', `
+    <form id="femp" class="form">
+      <div class="fila2"><label>Nombre comercial<input name="nombre" value="${esc(emp.nombre)}" placeholder="Comercial Zeppelin"></label>
+        <label>RFC<input name="rfc" value="${esc(emp.rfc)}"></label></div>
+      <label>Dirección<input name="direccion" value="${esc(emp.direccion)}"></label>
+      <div class="fila2"><label>Teléfono<input name="telefono" value="${esc(emp.telefono)}"></label>
+        <label>Correo (los proveedores responden a este)<input name="email" type="email" value="${esc(emp.email)}"></label></div>
+      <div class="campo"><span>Logo para las órdenes de compra</span>
+        <div class="fila-form"><img id="emp-logo" class="logo-prev" alt="" ${logo ? `src="${logo}"` : 'hidden'}>
+          <div class="acciones"><label class="btn sec">Elegir imagen<input type="file" accept="image/png,image/jpeg" id="emp-arch" hidden></label>
+          <button type="button" class="btn sec" id="emp-app">Usar el ícono de la app</button>
+          <button type="button" class="btn sec" id="emp-quitar" ${logo ? '' : 'hidden'}>Quitar</button></div></div></div>
+      <p class="msg" id="femp-msg"></p>
+      <div class="pie"><button type="button" class="btn sec" data-cerrar>Cancelar</button><button class="btn" type="submit">Guardar</button></div>
+    </form>`);
+  const f = $('#femp', d), img = $('#emp-logo', d), msg = $('#femp-msg', d);
+  const ponerLogo = url => {
+    logo = url;
+    img.hidden = !url;
+    if (url) img.src = url; else img.removeAttribute('src');
+    $('#emp-quitar', d).hidden = !url;
+  };
+  // Reduce la imagen a 240 px para que quepa en la base de datos
+  const reducir = src => new Promise((ok, mal) => {
+    const im = new Image();
+    im.onload = () => {
+      const e = Math.min(1, 240 / Math.max(im.width, im.height));
+      const c = document.createElement('canvas');
+      c.width = Math.round(im.width * e);
+      c.height = Math.round(im.height * e);
+      const g = c.getContext('2d');
+      g.fillStyle = '#fff';
+      g.fillRect(0, 0, c.width, c.height);
+      g.drawImage(im, 0, 0, c.width, c.height);
+      let url = c.toDataURL('image/png');
+      if (url.length > 44000) url = c.toDataURL('image/jpeg', 0.85);
+      if (url.length > 44000) url = c.toDataURL('image/jpeg', 0.6);
+      ok(url);
+    };
+    im.onerror = () => mal(new Error('No se pudo leer la imagen.'));
+    im.src = src;
+  });
+  $('#emp-arch', d).onchange = async e => {
+    const a = e.target.files[0];
+    if (!a) return;
+    try { ponerLogo(await reducir(URL.createObjectURL(a))); } catch (err) { msg.textContent = err.message; }
+  };
+  $('#emp-app', d).onclick = async () => {
+    try { ponerLogo(await reducir('icons/icon-512.png')); } catch (err) { msg.textContent = err.message; }
+  };
+  $('#emp-quitar', d).onclick = () => ponerLogo('');
+  f.onsubmit = async ev => {
+    ev.preventDefault();
+    msg.textContent = '';
+    try {
+      await conCarga('Guardando…', () => api('guardarEmpresa', { empresa: {
+        nombre: f.nombre.value, rfc: f.rfc.value, direccion: f.direccion.value, telefono: f.telefono.value, email: f.email.value, logo
+      } }));
+      cerrarModal();
+      toast('Datos de la empresa guardados.', 'ok');
+    } catch (e) { msg.textContent = e.message; }
+  };
+}
+
 /* ---- Almacenes ---- */
 function vAlmacenes(el) {
   el.innerHTML = `<div class="titulo"><h2>Almacenes y sucursales</h2><div class="acciones"><button type="button" class="btn" id="btn-nuevo">Nuevo almacén</button></div></div><div id="lista" class="tarjetas grandes"></div>`;
@@ -1351,6 +1983,7 @@ function vCuenta(el) {
       <p class="nota" id="persist"></p>
       <div class="acciones"><button type="button" class="btn" id="b-sync">Sincronizar ahora</button><button type="button" class="btn sec" id="b-inst" ${promptInstalar ? '' : 'hidden'}>Instalar en este equipo</button></div>
     </div>
+    ${esGeneral() ? `<div class="panel"><h3>Empresa</h3><p class="nota">Nombre, RFC, dirección y logo que aparecen en las órdenes de compra.</p><button type="button" class="btn sec" id="b-empresa">Datos de la empresa</button></div>` : ''}
     <div class="panel"><h3>Contraseña</h3><button type="button" class="btn sec" id="b-pass">Cambiar contraseña</button></div>
     <div class="panel"><button type="button" class="btn peligro" id="b-salir">Cerrar sesión</button></div>
     <p class="nota">Versión ${VERSION_APP}</p>`;
@@ -1363,6 +1996,7 @@ function vCuenta(el) {
   }
   $('#b-sync', el).onclick = () => sincronizar(true);
   $('#b-pass', el).onclick = () => dlgCambiarPassword(false);
+  if (esGeneral()) $('#b-empresa', el).onclick = dlgEmpresa;
   $('#b-salir', el).onclick = cerrarSesion;
   $('#b-inst', el).onclick = async () => {
     if (!promptInstalar) return;
@@ -1447,6 +2081,7 @@ async function iniciar() {
   } else {
     mostrarLogin('', /^https?:\/\//.test(CFG.API_URL) ? '' : 'Falta configurar API_URL en config.js.');
   }
+  ocultarCarga(true);
 
   setInterval(() => { if (S.usuario && navigator.onLine) sincronizar(); }, Math.max(1, Number(CFG.SYNC_MINUTOS) || 15) * 60000);
   setInterval(actualizarBarra, 30000);
