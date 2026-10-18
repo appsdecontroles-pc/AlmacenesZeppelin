@@ -71,6 +71,27 @@ En **Por pagar** (solo administrador general):
 
 Al actualizar el servidor a esta versión hay que ejecutar **instalar** otra vez. Crea las hojas CuentasPagar y Pagos, y las cuentas de las órdenes que ya estaban recibidas.
 
+## Punto de venta (fase 4)
+
+**Caja** (cajero, administrador de sucursal y administrador general):
+
+- **Apertura y venta:** se abre la caja con un fondo inicial. Los productos se buscan por nombre, categoría o código de barras; Enter agrega, y `3*7501…` agrega 3 piezas.
+- **Cliente y precios:** público en general (menudeo), cliente de mayoreo o precio especial por cliente. Al elegir el cliente se recalculan los precios.
+- **Cobro:** efectivo con cambio, tarjeta, transferencia, crédito o una mezcla. F2 abre el cobro.
+- **Ticket:** para impresora térmica de 58/80 mm, con reimpresión.
+- **Abonos y corte:** "Cobrar abono" para clientes con saldo. "Cerrar caja" compara el efectivo esperado (fondo + ventas en efectivo + abonos en efectivo) con lo contado.
+- **Sin internet:** ventas, abonos y corte se guardan en el equipo y se envían en orden al volver la conexión. Los clientes nuevos sí necesitan conexión.
+- **Reglas del crédito:** solo para clientes con crédito autorizado, sin saldo vencido y dentro de su límite. Sin conexión se permite con confirmación y queda anotado.
+
+**Ventas** (administradores):
+
+- **Ventas:** por periodo y sucursal, con total, utilidad bruta, formas de pago, detalle, cancelación (regresa la mercancía al inventario) y exportación a Excel.
+- **Cortes de caja:** con su diferencia.
+- **Clientes:** menudeo o mayoreo, crédito con límite de monto y días, y precios especiales.
+- **Por cobrar:** saldos, vencimientos y registro de abonos.
+
+Al actualizar el servidor a esta versión hay que ejecutar **instalar** otra vez para crear las hojas nuevas.
+
 ## Cómo funciona sin internet
 
 - Al entrar y cada 15 minutos, la app descarga catálogo, precios y existencias, y los guarda en el equipo.

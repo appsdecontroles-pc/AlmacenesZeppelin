@@ -323,3 +323,66 @@ details.panel-sub summary { cursor: pointer; }
 details.panel-sub[open] summary { margin-bottom: 10px; }
 .tabla tfoot td { background: var(--bg); border-top: 2px solid var(--borde); }
 .filtros label.chk input[type=month] { width: auto; }
+
+/* Punto de venta */
+.caja-top { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }
+.caja-top small { display: block; }
+.caja { display: grid; grid-template-columns: minmax(0, 1fr) 400px; gap: 14px; align-items: start; }
+@media (max-width: 900px) { .caja { grid-template-columns: 1fr; } .caja-ticket { position: static !important; } }
+.caja-buscar { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.caja-buscar #cj-q { font-size: 1.1rem; padding: .7em .9em; }
+.cats { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 2px; scrollbar-width: thin; }
+.cats button { border: 1px solid var(--borde); background: var(--panel); color: var(--texto); border-radius: 999px; padding: .35em .9em; font: inherit; font-size: .88rem; cursor: pointer; white-space: nowrap; }
+.cats button.activo { background: var(--primario); color: var(--primario-txt); border-color: var(--primario); }
+.cj-res { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
+.prod { text-align: left; font: inherit; color: var(--texto); background: var(--panel); border: 1px solid var(--borde); border-radius: 10px; padding: 10px; cursor: pointer;
+  display: flex; flex-direction: column; justify-content: space-between; gap: 6px; min-height: 84px; }
+.prod:hover { border-color: var(--primario); }
+.prod:active { transform: scale(.98); }
+.prod b { font-size: .92rem; font-weight: 600; line-height: 1.25; }
+.prod .precio { font-weight: 700; color: var(--primario); }
+.caja-ticket { position: sticky; top: 130px; background: var(--panel); border: 1px solid var(--borde); border-radius: var(--radio); padding: 12px; display: flex; flex-direction: column; gap: 10px; box-shadow: var(--sombra); }
+.cj-cliente { text-align: left; font: inherit; color: var(--texto); background: var(--bg); border: 1px solid var(--borde); border-radius: 8px; padding: 8px 10px; cursor: pointer; display: flex; flex-direction: column; gap: 2px; }
+.cj-lineas { max-height: 46vh; overflow: auto; display: flex; flex-direction: column; }
+.cj-linea { display: grid; grid-template-columns: 1fr auto auto auto; gap: 6px; align-items: center; padding: 6px 0; border-bottom: 1px solid var(--borde); }
+.cj-linea:has(.cj-precio) { grid-template-columns: 1fr auto 74px auto auto; }
+.cj-nombre { font-size: .9rem; min-width: 0; }
+.cj-cant { display: flex; align-items: center; }
+.cj-cant button { width: 28px; height: 30px; border: 1px solid var(--borde); background: var(--bg); color: var(--texto); font: inherit; font-weight: 700; cursor: pointer; }
+.cj-cant button:first-child { border-radius: 6px 0 0 6px; } .cj-cant button:last-child { border-radius: 0 6px 6px 0; }
+.cj-cant input { width: 52px; text-align: center; border-radius: 0; padding: .3em .2em; border-left: 0; border-right: 0; }
+.cj-precio { padding: .3em .4em; text-align: right; }
+.cj-imp { white-space: nowrap; font-size: .92rem; }
+.cj-vacio { text-align: center; padding: 18px 0; }
+.cj-total { display: flex; justify-content: space-between; align-items: baseline; border-top: 2px solid var(--primario); padding-top: 8px; }
+.cj-total b { font-size: 1.7rem; color: var(--primario); }
+.btn.cobrar { flex: 1; font-size: 1.15rem; padding: .7em 1em; }
+.btn.cobrar small { display: inline; color: inherit; opacity: .75; }
+.abrir-caja { max-width: 460px; margin: 20px auto; }
+.cobro-total { text-align: center; background: var(--primario-suave); border-radius: 10px; padding: 12px; display: flex; flex-direction: column; }
+.cobro-total b { font-size: 2.1rem; color: var(--primario); }
+.billetes { display: flex; flex-wrap: wrap; gap: 6px; }
+.billetes button { flex: 1 1 60px; border: 1px solid var(--borde); background: var(--bg); color: var(--texto); border-radius: 8px; padding: .5em; font: inherit; font-weight: 600; cursor: pointer; }
+.cobro-res, .corte-res { display: grid; grid-template-columns: 1fr auto; gap: 4px 16px; background: var(--bg); border-radius: 8px; padding: 10px 12px; margin: 0; }
+.cobro-res b { font-size: 1.25rem; }
+.cobro-res .cambio { color: var(--ok); }
+.lista-clientes { display: flex; flex-direction: column; gap: 6px; max-height: 50vh; overflow: auto; }
+.lista-clientes button { text-align: left; font: inherit; color: var(--texto); background: var(--bg); border: 1px solid var(--borde); border-radius: 8px; padding: 8px 10px; cursor: pointer; }
+.lista-clientes button:hover { border-color: var(--primario); }
+.ir-caja { display: flex; justify-content: space-between; align-items: center; width: 100%; background: var(--primario); color: var(--primario-txt); border: 0; border-radius: var(--radio);
+  padding: 16px 18px; font: inherit; font-size: 1.15rem; cursor: pointer; text-align: left; }
+.ir-caja span { opacity: .85; font-size: .9rem; }
+.cj-movil { display: none; }
+@media (max-width: 900px) {
+  .cj-movil { display: flex; gap: 8px; position: fixed; left: 0; right: 0; bottom: 0; z-index: 6; padding: 8px 12px calc(8px + env(safe-area-inset-bottom));
+    background: var(--panel); border-top: 1px solid var(--borde); box-shadow: 0 -4px 14px rgba(0, 0, 0, .08); }
+  .cj-ver { flex: 1; text-align: left; font: inherit; color: var(--texto); background: none; border: 0; display: flex; flex-direction: column; cursor: pointer; }
+  .cj-ver b { font-size: 1.3rem; color: var(--primario); }
+  .cj-movil .btn.cobrar { flex: 0 0 40%; }
+  .vista:has(.cj-movil) { padding-bottom: 90px; }
+  .toasts { bottom: 84px; }
+}
+@media (max-width: 520px) {
+  .cj-precio { display: none; }
+  .cj-linea, .cj-linea:has(.cj-precio) { grid-template-columns: 1fr auto auto auto; }
+}

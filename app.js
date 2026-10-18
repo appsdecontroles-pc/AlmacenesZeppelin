@@ -4,7 +4,7 @@
  * Servidor: Google Apps Script (API) + Google Sheets (base de datos). */
 
 const CFG = Object.assign({ NOMBRE: 'Control de Inventario', SYNC_MINUTOS: 15, API_URL: '' }, window.APP_CONFIG || {});
-const VERSION_APP = '3.0.0';
+const VERSION_APP = '4.0.0';
 
 const ROL_TXT = {
   ADMIN_GENERAL: 'Administrador general',
@@ -31,7 +31,9 @@ const S = {
   online: navigator.onLine, outbox: [], vista: 'inicio',
   sincronizando: false, otraVez: false, idx: { prod: {}, cat: {}, alm: {}, barras: {}, codigo: {} },
   refrescar: null,
-  alertas: null
+  alertas: null,
+  clientes: [],
+  precios: []
 };
 const F = {}; // filtros que se recuerdan entre vistas
 let promptInstalar = null;
@@ -241,6 +243,8 @@ function mapaExistencias() {
         m[k] = (m[k] || 0) - c;
         const kd = o.destino_id + '|' + o.producto_id;
         m[kd] = (m[kd] || 0) + c;
+      } else if (o.clase === 'VENTA') {
+        o.lineas.forEach(l => { const kv = o.almacen_id + '|' + l.producto_id; m[kv] = (m[kv] || 0) - Number(l.cantidad); });
       }
     });
   return m;
@@ -248,7 +252,7 @@ function mapaExistencias() {
 
 /* ---------------- Sesión ---------------- */
 async function cargarSesion(ses) {
-  if (!S.usuario || S.usuario.usuario !== ses.usuario.usuario) { CMP.datos = null; CPP.datos = null; }
+  if (!S.usuario || S.usuario.usuario !== ses.usuario.usuario) { CMP.datos = null; CPP.datos = null; CJ.estado = null; VT.cli = null; VT.ventas = null; }
   S.token = ses.token;
   S.usuario = ses.usuario;
   const [cat, ex, ver, rolCat, ult, out] = await Promise.all([
@@ -261,6 +265,8 @@ async function cargarSesion(ses) {
   S.ultimaSync = ult || 0;
   S.outbox = out || [];
   S.alertas = esGeneral() ? (await DB.get('alertas')) || null : null;
+  S.clientes = (await DB.get('clientes')) || [];
+  S.precios = (await DB.get('precios')) || [];
   indexar();
 }
 
@@ -293,7 +299,7 @@ async function onLogin(ev) {
     await DB.set('sesion', ses);
     f.password.value = '';
     await cargarSesion(ses);
-    S.vista = 'inicio';
+    S.vista = rol() === 'CAJERO' ? 'caja' : 'inicio';
     mostrarApp();
     if (!ses.offline) {
       await sincronizar();
@@ -320,6 +326,7 @@ async function sesionVencida(msg) {
 
 async function cerrarSesion() {
   const pend = misPendientes().filter(o => o.estado === 'pendiente').length;
+  if (CJ.estado && CJ.estado.corte && !confirm('Tu caja sigue abierta. Al volver a entrar la encontrarás igual. ¿Cerrar sesión?')) return;
   if (pend && !confirm(`Hay ${pend} movimiento(s) sin enviar. Se quedan guardados y se enviarán cuando ${S.usuario.usuario} vuelva a entrar con internet. ¿Cerrar sesión?`)) return;
   if (S.online) api('logout').catch(() => {});
   await DB.del('sesion');
@@ -332,7 +339,9 @@ async function cerrarSesion() {
 
 /* ---------------- Sincronización ---------------- */
 async function enviarPendientes() {
-  const pend = misPendientes().filter(o => o.estado === 'pendiente');
+  const todos = misPendientes().filter(o => o.estado === 'pendiente');
+  const pend = todos.filter(o => !o.clase);
+  const ops = todos.filter(o => o.clase).sort((a, b) => a.seq - b.seq);
   const avisos = [];
   let rechazados = 0;
   for (let i = 0; i < pend.length; i += 50) {
@@ -353,8 +362,27 @@ async function enviarPendientes() {
       }
     }
   }
+  for (let i = 0; i < ops.length; i += 25) {
+    const lote = ops.slice(i, i + 25);
+    const r = await api('registrarCaja', { operaciones: lote });
+    for (const res of r.resultados) {
+      const o = lote.find(x => x.id === res.id);
+      if (!o) continue;
+      if (res.estado === 'rechazado') {
+        o.estado = 'rechazado';
+        o.error = res.error;
+        rechazados++;
+        await DB.guardarMov(o);
+      } else {
+        S.outbox = S.outbox.filter(x => x !== o);
+        await DB.borrarMov(o.id);
+        if (res.aviso) avisos.push(res.aviso);
+      }
+      resultadoCaja(o, res);
+    }
+  }
   avisos.forEach(a => toast(a, 'aviso'));
-  if (rechazados) toast(`${rechazados} movimiento(s) rechazados. Revísalos en Movimientos.`, 'error');
+  if (rechazados) toast(`${plural(rechazados, 'operación')} rechazada(s). Revísalas en Movimientos o en Caja.`, 'error');
 }
 
 async function sincronizar(manual = false) {
@@ -377,6 +405,18 @@ async function sincronizar(manual = false) {
     await DB.set('existencias', S.existencias);
     S.alertas = d.alertas || null;
     await DB.set('alertas', S.alertas);
+    if (d.clientes) {
+      // Conserva el saldo local de lo que aún no se envía (ventas a crédito y abonos en cola)
+      const ajuste = {};
+      misPendientes().filter(o => o.estado === 'pendiente').forEach(o => {
+        if (o.clase === 'VENTA' && o.cliente_id && Number(o.pagos.credito) > 0) ajuste[o.cliente_id] = (ajuste[o.cliente_id] || 0) + Number(o.pagos.credito);
+        if (o.clase === 'ABONO') ajuste[o.cliente_id] = (ajuste[o.cliente_id] || 0) - Number(o.monto);
+      });
+      S.clientes = d.clientes.map(c => (ajuste[c.id] ? Object.assign(c, { saldo: Math.max(0, Number(c.saldo) + ajuste[c.id]) }) : c));
+      S.precios = d.precios || [];
+      await DB.set('clientes', S.clientes);
+      await DB.set('precios', S.precios);
+    }
     S.usuario = d.usuario;
     const ses = await DB.get('sesion');
     if (ses) { ses.usuario = d.usuario; ses.offline = false; await DB.set('sesion', ses); }
@@ -399,11 +439,13 @@ async function sincronizar(manual = false) {
 /* ---------------- Pantallas ---------------- */
 const VISTAS = {
   inicio: { titulo: 'Inicio', roles: null, render: vInicio },
+  caja: { titulo: 'Caja', roles: ['ADMIN_GENERAL', 'ADMIN_SUCURSAL', 'CAJERO'], render: vCaja },
   productos: { titulo: 'Productos', roles: ['ADMIN_GENERAL', 'ADMIN_SUCURSAL', 'INVENTARIOS', 'CAJERO'], render: vProductos },
   inventario: { titulo: 'Inventario', roles: ['ADMIN_GENERAL', 'ADMIN_SUCURSAL', 'INVENTARIOS', 'CAJERO'], render: vInventario },
   movimientos: { titulo: 'Movimientos', roles: ['ADMIN_GENERAL', 'ADMIN_SUCURSAL', 'INVENTARIOS'], render: vMovimientos },
   compras: { titulo: 'Compras', roles: ['ADMIN_GENERAL', 'INVENTARIOS'], render: vCompras },
   pagar: { titulo: 'Por pagar', roles: ['ADMIN_GENERAL'], render: vPagar },
+  ventas: { titulo: 'Ventas', roles: ['ADMIN_GENERAL', 'ADMIN_SUCURSAL'], render: vVentas },
   almacenes: { titulo: 'Almacenes', roles: ['ADMIN_GENERAL'], render: vAlmacenes },
   usuarios: { titulo: 'Usuarios', roles: ['ADMIN_GENERAL', 'ADMIN_SUCURSAL'], render: vUsuarios },
   cuenta: { titulo: 'Mi cuenta', roles: null, render: vCuenta }
@@ -483,7 +525,9 @@ function vInicio(el) {
   const pend = mios.filter(o => o.estado === 'pendiente').length;
   const rech = mios.filter(o => o.estado === 'rechazado').length;
   const miAlm = S.idx.alm[S.usuario.almacen_id];
+  const enCaja = VISTAS.caja.roles.includes(rol());
   el.innerHTML = `
+    ${enCaja ? `<button type="button" class="ir-caja" id="t-caja"><b>${CJ.estado && CJ.estado.corte ? 'Ir a la caja' : 'Abrir caja'}</b><span>Punto de venta</span></button>` : ''}
     <div class="saludo"><h2>Hola, ${esc(S.usuario.nombre)}</h2><p>${esc(ROL_TXT[rol()] || rol())}${miAlm ? ' · ' + esc(miAlm.nombre) : ''}</p></div>
     <div class="tarjetas">
       <div class="tarjeta"><span>Productos activos</span><b>${numero(prods.length)}</b></div>
@@ -504,6 +548,8 @@ function vInicio(el) {
     </div>`;
   $('#btn-sync', el).onclick = () => sincronizar(true);
   $('#t-bajos', el).onclick = () => { F.ibajo = true; irA('inventario'); };
+  const tc = $('#t-caja', el);
+  if (tc) tc.onclick = () => irA('caja');
   $$('[data-pagos]', el).forEach(b => { b.onclick = () => { CPP.filtro = b.dataset.pagos; irA('pagar'); }; });
   S.refrescar = () => vInicio(el);
 }
@@ -1124,7 +1170,7 @@ function vMovimientos(el) {
     $('#txt-cant', el).textContent = M.tipo === 'AJUSTE' ? 'Existencia contada' : 'Cantidad';
   };
   const pintarPend = () => {
-    const l = misPendientes().sort((a, b) => (a.fecha < b.fecha ? 1 : -1));
+    const l = misPendientes().filter(o => !o.clase).sort((a, b) => (a.fecha < b.fecha ? 1 : -1));
     $('#pend', el).innerHTML = l.length ? `<div class="panel"><h3>Por enviar / con error</h3><ul class="lista">${l.map(o => {
       const prod = S.idx.prod[o.producto_id];
       const cant = o.tipo === 'AJUSTE' ? 'Conteo: ' + numero(o.cantidad) : numero(o.cantidad);
@@ -1869,7 +1915,7 @@ function estadoCuenta(c) {
 }
 const chipCuenta = c => { const e = estadoCuenta(c); return `<span class="est cxp-${e}">${CXP_TXT[e]}</span>`; };
 const provCxp = id => ((CPP.datos && CPP.datos.proveedores.find(p => p.id === id)) || {});
-const plural = (n, palabra) => `${n} ${palabra}${n === 1 ? '' : 's'}`;
+const plural = (n, palabra) => `${n} ${n === 1 ? palabra : palabra.endsWith('ón') ? palabra.slice(0, -2) + 'ones' : /[aeiou]$/.test(palabra) ? palabra + 's' : palabra + 'es'}`;
 const condicionTxt = c => (c.condicion === 'CREDITO' ? `Crédito ${Number(c.dias_credito) || 0} días` : 'Contado');
 
 function leerBase64(archivo) {
@@ -2267,6 +2313,888 @@ function exportarMes() {
   Excel.descargar(blob, `cuentas-por-pagar-${mes}.xlsx`);
 }
 
+/* ---- Punto de venta (fase 4) ---- */
+const METODOS_CAJA = { EFECTIVO: 'Efectivo', TARJETA: 'Tarjeta', TRANSFERENCIA: 'Transferencia' };
+const CJ = { estado: null, ticket: { cliente_id: '', lineas: [] }, cat: '', q: '', imprimir: true };
+let secuenciaOp = 0;
+
+const esAdminCaja = () => ['ADMIN_GENERAL', 'ADMIN_SUCURSAL'].includes(rol());
+const clientePorId = id => (S.clientes || []).find(c => c.id === id) || null;
+function precioCliente(p, cli) {
+  if (cli) {
+    const pe = (S.precios || []).find(x => x.cliente_id === cli.id && x.producto_id === p.id);
+    if (pe) return Number(pe.precio);
+    if (cli.tipo === 'MAYOREO' && Number(p.precio_mayoreo) > 0) return Number(p.precio_mayoreo);
+  }
+  return Number(p.precio_menudeo) || 0;
+}
+function creditoDisponible(cli) {
+  if (!cli || !cli.credito) return 0;
+  return Math.max(0, Math.round((Number(cli.limite_credito) - Number(cli.saldo || 0)) * 100) / 100);
+}
+const ticketCorto = id => String(id).replace(/-/g, '').slice(0, 8).toUpperCase();
+
+async function cargarCaja() {
+  CJ.estado = (await DB.get('caja:' + S.usuario.usuario)) || { corte: null, ventas: [], abonos: [], ultimoCorte: null };
+  const imp = await DB.get('caja:imprimir');
+  CJ.imprimir = imp !== false;
+}
+const guardarCaja = () => DB.set('caja:' + S.usuario.usuario, CJ.estado);
+
+// Encola una operación de caja (se envía en orden; funciona sin conexión)
+async function encolarCaja(op) {
+  op.seq = Date.now() * 1000 + (secuenciaOp++ % 1000);
+  op.fecha = op.fecha || new Date().toISOString();
+  op.estado = 'pendiente';
+  op.usuario = S.usuario.usuario;
+  op.origen = navigator.onLine && S.online ? 'online' : 'offline';
+  await DB.guardarMov(op);
+  S.outbox.push(op);
+  actualizarBarra();
+  if (navigator.onLine) sincronizar();
+}
+
+// Respuesta del servidor a una operación de caja
+function resultadoCaja(op, res) {
+  if (!CJ.estado) return;
+  if (op.clase === 'VENTA') {
+    const v = CJ.estado.ventas.find(x => x.id === op.id);
+    if (v) {
+      if (res.folio) v.folio = res.folio;
+      v.sync = res.estado === 'rechazado' ? 'error' : 'enviada';
+      v.error = res.error || '';
+      if (res.aviso) v.aviso = res.aviso;
+    }
+  }
+  if (op.clase === 'CORTE_CERRAR' && res.corte) CJ.estado.ultimoCorteServidor = res.corte;
+  guardarCaja();
+}
+
+function vCaja(el) {
+  S.refrescar = null;
+  CJ.repintar = null;
+  if (!CJ.estado) { el.innerHTML = '<p class="nota">Cargando caja…</p>'; cargarCaja().then(() => vCaja(el)); return; }
+  const E = CJ.estado;
+  const rechazadas = misPendientes().filter(o => o.clase && o.estado === 'rechazado');
+  const avisoRech = rechazadas.length ? `<div class="aviso-offline">${plural(rechazadas.length, 'operación')} de caja fue rechazada por el servidor.
+    <button type="button" class="btn mini sec" id="cj-rech">Ver</button></div>` : '';
+  if (!E.corte) return pintarAbrirCaja(el, avisoRech);
+
+  const alm = S.idx.alm[E.corte.almacen_id] || {};
+  el.innerHTML = `
+    ${avisoRech}
+    <div class="caja-top">
+      <div><b>Caja · ${esc(alm.nombre || '')}</b><small>Abierta ${fechaHora(E.corte.apertura)} · Fondo ${dinero(E.corte.fondo)} · ${plural(E.ventas.filter(v => !v.cancelada).length, 'venta')}</small></div>
+      <div class="acciones"><button type="button" class="btn sec" id="cj-ventas">Ventas del turno</button>
+        <button type="button" class="btn sec" id="cj-abono">Cobrar abono</button>
+        <button type="button" class="btn sec" id="cj-cerrar">Cerrar caja</button></div>
+    </div>
+    <div class="caja">
+      <section class="caja-buscar">
+        <input id="cj-q" type="search" placeholder="Escanea o busca: nombre, código. Usa 3*código para varias piezas" autocomplete="off" value="${esc(CJ.q)}">
+        <div class="cats" id="cj-cats"></div>
+        <div class="cj-res" id="cj-res"></div>
+      </section>
+      <aside class="caja-ticket">
+        <button type="button" class="cj-cliente" id="cj-cliente"></button>
+        <div class="cj-lineas" id="cj-lineas"></div>
+        <div class="cj-total" id="cj-total"></div>
+        <div class="acciones"><button type="button" class="btn cobrar" id="cj-cobrar">Cobrar <small>(F2)</small></button>
+          <button type="button" class="btn sec" id="cj-vaciar">Vaciar</button></div>
+      </aside>
+    </div>
+    <div class="cj-movil" id="cj-movil"><button type="button" class="cj-ver" id="cj-ver"></button><button type="button" class="btn cobrar" id="cj-cobrar2">Cobrar</button></div>`;
+
+  const q = $('#cj-q', el);
+  const cats = S.catalogo.categorias.filter(c => esActivo(c.activo)).sort(porNombre);
+  $('#cj-cats', el).innerHTML = [['', 'Todas']].concat(cats.map(c => [c.id, c.nombre]))
+    .map(([id, n]) => `<button type="button" data-cat="${esc(id)}" class="${CJ.cat === id ? 'activo' : ''}">${esc(n)}</button>`).join('');
+
+  const pintarRes = () => {
+    const ex = mapaExistencias();
+    const cli = clientePorId(CJ.ticket.cliente_id);
+    const t = normal(CJ.q.replace(/^\d+(\.\d+)?\*/, ''));
+    const lista = S.catalogo.productos
+      .filter(p => esActivo(p.activo) && (!CJ.cat || p.categoria_id === CJ.cat) && (!t || coincide(p, t)))
+      .sort(porNombre).slice(0, 60);
+    $('#cj-res', el).innerHTML = lista.length ? lista.map(p => {
+      const c = ex[E.corte.almacen_id + '|' + p.id] || 0;
+      return `<button type="button" class="prod" data-p="${esc(p.id)}"><b>${esc(p.nombre)}</b>
+        <span class="fila-oc"><span class="precio">${dinero(precioCliente(p, cli))}</span><small class="${c <= 0 ? 'txt-error' : ''}">${numero(c)} ${esc(p.unidad || '')}</small></span></button>`;
+    }).join('') : '<p class="nota">Sin productos que coincidan.</p>';
+  };
+  const pintarTicket = () => {
+    const cli = clientePorId(CJ.ticket.cliente_id);
+    $('#cj-cliente', el).innerHTML = cli
+      ? `<span><b>${esc(cli.nombre)}</b> <span class="est ${cli.tipo === 'MAYOREO' ? 'est-ENVIADA' : 'est-BORRADOR'}">${cli.tipo === 'MAYOREO' ? 'Mayoreo' : 'Menudeo'}</span></span>
+         <small>${cli.credito ? `Crédito disponible ${dinero(creditoDisponible(cli))}${Number(cli.vencido) > 0 ? ' · <span class="txt-error">saldo vencido</span>' : ''}` : 'Sin crédito'} · cambiar</small>`
+      : '<span><b>Público en general</b></span><small>Toca para elegir cliente</small>';
+    const L = CJ.ticket.lineas;
+    $('#cj-lineas', el).innerHTML = L.length ? L.map((l, i) => {
+      const p = S.idx.prod[l.producto_id] || {};
+      return `<div class="cj-linea"><div class="cj-nombre">${esc(p.nombre || '—')}<small>${dinero(l.precio)} c/u</small></div>
+        <div class="cj-cant"><button type="button" data-menos="${i}">−</button><input type="number" step="any" min="0" data-cant="${i}" value="${l.cantidad}"><button type="button" data-mas="${i}">+</button></div>
+        ${esAdminCaja() ? `<input class="cj-precio" type="number" step="0.01" min="0" data-precio="${i}" value="${l.precio}" title="Precio">` : ''}
+        <b class="cj-imp">${dinero(l.cantidad * l.precio)}</b><button type="button" class="icono" data-quitar="${i}" title="Quitar">✕</button></div>`;
+    }).join('') : '<p class="nota cj-vacio">Escanea o toca un producto para agregarlo.</p>';
+    const total = totalTicket();
+    $('#cj-total', el).innerHTML = `<span>${plural(L.reduce((s, l) => s + Number(l.cantidad), 0), 'artículo')}</span><b>${dinero(total)}</b>`;
+    $('#cj-cobrar', el).disabled = !L.length;
+    $('#cj-cobrar2', el).disabled = !L.length;
+    $('#cj-ver', el).innerHTML = `<small>${plural(L.reduce((s, l) => s + Number(l.cantidad), 0), 'artículo')} · ver ticket</small><b>${dinero(total)}</b>`;
+  };
+  const agregar = (p, cantidad = 1) => {
+    const cli = clientePorId(CJ.ticket.cliente_id);
+    const ya = CJ.ticket.lineas.find(l => l.producto_id === p.id);
+    if (ya) ya.cantidad = Math.round((Number(ya.cantidad) + cantidad) * 1000) / 1000;
+    else CJ.ticket.lineas.push({ producto_id: p.id, cantidad, precio: precioCliente(p, cli) });
+    pintarTicket();
+  };
+  CJ.repintar = () => { pintarRes(); pintarTicket(); };
+  S.refrescar = CJ.repintar;
+  pintarRes();
+  pintarTicket();
+  q.focus();
+
+  q.oninput = () => { CJ.q = q.value; pintarRes(); };
+  q.onkeydown = e => {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    let v = q.value.trim(), cant = 1;
+    const m = v.match(/^(\d+(?:\.\d+)?)\*(.+)$/);
+    if (m) { cant = Number(m[1]); v = m[2].trim(); }
+    const p = S.idx.barras[v] || S.idx.codigo[normal(v)];
+    const t = normal(v);
+    const unicos = p ? [p] : S.catalogo.productos.filter(x => esActivo(x.activo) && coincide(x, t));
+    if (unicos.length === 1) {
+      agregar(unicos[0], cant);
+      q.value = ''; CJ.q = ''; pintarRes();
+    } else if (v) toast(unicos.length ? 'Hay varios productos: tócalo en la lista.' : 'No se encontró el producto.', unicos.length ? '' : 'error');
+  };
+  $('#cj-cats', el).onclick = e => {
+    const b = e.target.closest('[data-cat]');
+    if (!b) return;
+    CJ.cat = b.dataset.cat;
+    $$('#cj-cats button', el).forEach(x => x.classList.toggle('activo', x === b));
+    pintarRes();
+  };
+  $('#cj-res', el).onclick = e => {
+    const b = e.target.closest('[data-p]');
+    if (b) { agregar(S.idx.prod[b.dataset.p]); q.focus(); }
+  };
+  const lin = $('#cj-lineas', el);
+  lin.onclick = e => {
+    const t = e.target;
+    const L = CJ.ticket.lineas;
+    if (t.dataset.mas !== undefined) L[t.dataset.mas].cantidad = Number(L[t.dataset.mas].cantidad) + 1;
+    else if (t.dataset.menos !== undefined) {
+      const l = L[t.dataset.menos];
+      l.cantidad = Number(l.cantidad) - 1;
+      if (l.cantidad <= 0) L.splice(Number(t.dataset.menos), 1);
+    } else if (t.closest('[data-quitar]')) L.splice(Number(t.closest('[data-quitar]').dataset.quitar), 1);
+    else return;
+    pintarTicket();
+  };
+  lin.onchange = e => {
+    const t = e.target;
+    const L = CJ.ticket.lineas;
+    if (t.dataset.cant !== undefined) {
+      const n = Number(t.value);
+      if (n > 0) L[t.dataset.cant].cantidad = n; else L.splice(Number(t.dataset.cant), 1);
+    }
+    if (t.dataset.precio !== undefined) L[t.dataset.precio].precio = Math.max(0, Number(t.value) || 0);
+    pintarTicket();
+  };
+  $('#cj-cliente', el).onclick = () => dlgElegirCliente(id => {
+    CJ.ticket.cliente_id = id;
+    const cli = clientePorId(id);
+    CJ.ticket.lineas.forEach(l => { const p = S.idx.prod[l.producto_id]; if (p) l.precio = precioCliente(p, cli); });
+    pintarTicket(); pintarRes();
+  });
+  $('#cj-vaciar', el).onclick = () => {
+    if (CJ.ticket.lineas.length && !confirm('¿Vaciar el ticket?')) return;
+    CJ.ticket = { cliente_id: '', lineas: [] };
+    pintarTicket(); pintarRes();
+  };
+  $('#cj-cobrar', el).onclick = () => dlgCobrar(() => { CJ.ticket = { cliente_id: '', lineas: [] }; vCaja(el); });
+  $('#cj-cobrar2', el).onclick = () => $('#cj-cobrar', el).click();
+  $('#cj-ver', el).onclick = () => $('.caja-ticket', el).scrollIntoView({ behavior: 'smooth', block: 'start' });
+  $('#cj-ventas', el).onclick = () => dlgVentasTurno(() => vCaja(el));
+  $('#cj-abono', el).onclick = () => dlgAbono(null, () => vCaja(el));
+  $('#cj-cerrar', el).onclick = () => dlgCerrarCaja(() => vCaja(el));
+  const rech = $('#cj-rech', el);
+  if (rech) rech.onclick = () => dlgRechazadasCaja(() => vCaja(el));
+}
+
+function totalTicket() {
+  return Math.round(CJ.ticket.lineas.reduce((s, l) => s + Number(l.cantidad) * Number(l.precio), 0) * 100) / 100;
+}
+
+function pintarAbrirCaja(el, avisoRech) {
+  const alms = esGeneral() ? S.catalogo.almacenes.filter(a => esActivo(a.activo)).sort(porNombre) : almacenesVisibles();
+  const E = CJ.estado;
+  el.innerHTML = `${avisoRech}
+    <div class="panel abrir-caja">
+      <h2>Abrir caja</h2>
+      ${alms.length ? `<form id="cj-abrir" class="form">
+        <label>Sucursal<select name="almacen_id">${alms.map(a => `<option value="${esc(a.id)}" ${a.tipo === 'SUCURSAL' && !F.cajaAlm ? '' : ''}${F.cajaAlm === a.id ? 'selected' : ''}>${esc(a.nombre)}</option>`).join('')}</select></label>
+        <label>Fondo inicial (efectivo para cambio)<input name="fondo" type="number" step="0.01" min="0" value="0" inputmode="decimal"></label>
+        <button class="btn" type="submit">Abrir caja</button>
+      </form>` : '<p class="txt-error">No tienes una sucursal asignada.</p>'}
+      ${E.ultimoCorte ? `<p class="nota">Último corte: ${fechaHora(E.ultimoCorte.cierre)} · diferencia ${dinero(E.ultimoCorte.diferencia)}
+        <button type="button" class="btn mini sec" id="cj-reimp-corte">Reimprimir corte</button></p>` : ''}
+    </div>`;
+  const f = $('#cj-abrir', el);
+  if (f) {
+    f.fondo.focus();
+    f.fondo.select();
+    f.onsubmit = async ev => {
+      ev.preventDefault();
+      F.cajaAlm = f.almacen_id.value;
+      const op = { clase: 'CORTE_ABRIR', id: uuid(), almacen_id: f.almacen_id.value, fondo: Number(f.fondo.value) || 0 };
+      E.corte = { id: op.id, almacen_id: op.almacen_id, fondo: op.fondo, apertura: new Date().toISOString() };
+      E.ventas = [];
+      E.abonos = [];
+      await guardarCaja();
+      await encolarCaja(op);
+      toast('Caja abierta.', 'ok');
+      vCaja(el);
+    };
+  }
+  const re = $('#cj-reimp-corte', el);
+  if (re) re.onclick = () => imprimirCorte(E.ultimoCorte);
+  const rech = $('#cj-rech', el);
+  if (rech) rech.onclick = () => dlgRechazadasCaja(() => vCaja(el));
+}
+
+function dlgElegirCliente(alElegir) {
+  const d = abrirModal('Cliente de la venta', `
+    <div class="form">
+      <input id="ec-q" type="search" placeholder="Buscar por nombre o teléfono" autocomplete="off">
+      <div id="ec-lista" class="lista-clientes"></div>
+      <details class="panel-sub"><summary><b>Nuevo cliente</b></summary>
+        <form id="ec-nuevo" class="form">
+          <div class="fila2"><label>Nombre<input name="nombre" required></label><label>Teléfono<input name="telefono" type="tel"></label></div>
+          ${esAdminCaja() ? '<p class="nota">Para mayoreo, crédito o precios especiales, edítalo después en Ventas › Clientes.</p>' : '<p class="nota">Se registra como cliente de menudeo. Un administrador puede asignarle mayoreo o crédito.</p>'}
+          <p class="msg" id="ec-msg"></p>
+          <button class="btn" type="submit">Registrar y elegir</button>
+        </form></details>
+    </div>`);
+  const pintar = () => {
+    const q = normal($('#ec-q', d).value);
+    const l = (S.clientes || []).filter(c => c.activo !== false && (!q || normal(c.nombre + ' ' + (c.telefono || '')).includes(q))).sort(porNombre).slice(0, 50);
+    $('#ec-lista', d).innerHTML = `<button type="button" data-cli=""><b>Público en general</b><small>Precio de menudeo</small></button>` +
+      l.map(c => `<button type="button" data-cli="${esc(c.id)}"><b>${esc(c.nombre)}</b>
+        <small>${c.tipo === 'MAYOREO' ? 'Mayoreo' : 'Menudeo'}${c.telefono ? ' · ' + esc(c.telefono) : ''}${c.credito ? ' · crédito disponible ' + dinero(creditoDisponible(c)) : ''}${Number(c.vencido) > 0 ? ' · <span class="txt-error">vencido ' + dinero(c.vencido) + '</span>' : ''}</small></button>`).join('');
+  };
+  pintar();
+  $('#ec-q', d).oninput = pintar;
+  $('#ec-q', d).focus();
+  $('#ec-lista', d).onclick = e => {
+    const b = e.target.closest('[data-cli]');
+    if (b) { cerrarModal(); alElegir(b.dataset.cli); }
+  };
+  $('#ec-nuevo', d).onsubmit = async ev => {
+    ev.preventDefault();
+    const f = ev.target, msg = $('#ec-msg', d);
+    if (!navigator.onLine) { msg.textContent = 'Sin conexión no se pueden registrar clientes. Vende como Público en general.'; return; }
+    try {
+      const c = await conCarga('Registrando…', () => api('guardarCliente', { cliente: { nuevo: true, id: uuid(), nombre: f.nombre.value.trim(), telefono: f.telefono.value.trim() } }));
+      S.clientes = (S.clientes || []).concat([c]);
+      DB.set('clientes', S.clientes);
+      cerrarModal();
+      toast('Cliente registrado.', 'ok');
+      alElegir(c.id);
+    } catch (e) { msg.textContent = e.message; }
+  };
+}
+
+function dlgCobrar(alTerminar) {
+  const total = totalTicket();
+  const cli = clientePorId(CJ.ticket.cliente_id);
+  const disp = creditoDisponible(cli);
+  const vencido = cli && Number(cli.vencido) > 0;
+  const d = abrirModal('Cobrar', `
+    <form id="fcob" class="form" autocomplete="off">
+      <div class="cobro-total"><span>Total a cobrar</span><b>${dinero(total)}</b><small>${esc(cli ? cli.nombre : 'Público en general')}</small></div>
+      <label>Efectivo recibido<input name="recibido" type="number" step="0.01" min="0" inputmode="decimal" placeholder="0.00"></label>
+      <div class="billetes">${['Exacto', 20, 50, 100, 200, 500, 1000].map(b => `<button type="button" data-b="${b}">${b === 'Exacto' ? b : '$' + b}</button>`).join('')}</div>
+      <div class="fila3">
+        <label>Tarjeta<input name="tarjeta" type="number" step="0.01" min="0" inputmode="decimal" placeholder="0.00"></label>
+        <label>Transferencia<input name="transferencia" type="number" step="0.01" min="0" inputmode="decimal" placeholder="0.00"></label>
+        ${cli && cli.credito ? `<label>Crédito <small>${vencido ? '<span class="txt-error">tiene saldo vencido</span>' : 'disponible ' + dinero(disp)}</small>
+          <input name="credito" type="number" step="0.01" min="0" inputmode="decimal" placeholder="0.00"></label>` : ''}
+      </div>
+      ${cli && cli.credito ? '<div class="acciones"><button type="button" class="btn mini sec" id="cob-credito">Todo a crédito</button></div>' : ''}
+      <div class="cobro-res" id="cob-res"></div>
+      <label class="chk"><input type="checkbox" name="imprimir" ${CJ.imprimir ? 'checked' : ''}> Imprimir ticket</label>
+      <p class="msg" id="cob-msg"></p>
+      <div class="pie"><button type="button" class="btn sec" data-cerrar>Regresar</button><button class="btn" type="submit">Confirmar venta</button></div>
+    </form>`);
+  const f = $('#fcob', d), msg = $('#cob-msg', d);
+  const v = n => Math.round((Number(f[n] ? f[n].value : 0) || 0) * 100) / 100;
+  const calcular = () => {
+    const otros = Math.round((v('tarjeta') + v('transferencia') + v('credito')) * 100) / 100;
+    const efectivo = Math.max(0, Math.round((total - otros) * 100) / 100);
+    const recibido = v('recibido');
+    const cambio = Math.round((recibido - efectivo) * 100) / 100;
+    $('#cob-res', d).innerHTML = `<span>Efectivo a cobrar</span><b>${dinero(efectivo)}</b>
+      <span>${cambio >= 0 ? 'Cambio' : 'Falta'}</span><b class="${cambio >= 0 ? 'cambio' : 'txt-error'}">${dinero(Math.abs(cambio))}</b>`;
+    return { otros, efectivo, recibido, cambio };
+  };
+  calcular();
+  f.oninput = calcular;
+  f.recibido.focus();
+  $('.billetes', d).onclick = e => {
+    const b = e.target.closest('[data-b]');
+    if (!b) return;
+    const c = calcular();
+    f.recibido.value = b.dataset.b === 'Exacto' ? c.efectivo.toFixed(2) : b.dataset.b;
+    calcular();
+  };
+  const tc = $('#cob-credito', d);
+  if (tc) tc.onclick = () => { f.credito.value = total.toFixed(2); f.tarjeta.value = ''; f.transferencia.value = ''; f.recibido.value = ''; calcular(); };
+
+  f.onsubmit = async ev => {
+    ev.preventDefault();
+    const c = calcular();
+    const credito = v('credito');
+    if (c.otros > total + 0.01) { msg.textContent = 'Tarjeta, transferencia y crédito suman más que el total.'; return; }
+    if (c.efectivo > 0 && c.recibido + 0.001 < c.efectivo) { msg.textContent = `Falta efectivo: recibe al menos ${dinero(c.efectivo)}.`; return; }
+    if (credito > 0) {
+      const enLinea = navigator.onLine && S.online;
+      const problema = vencido ? 'El cliente tiene saldo vencido.' : (credito > disp + 0.01 ? `El crédito disponible es ${dinero(disp)}.` : '');
+      if (problema) {
+        if (enLinea) { msg.textContent = problema + ' No se puede vender a crédito.'; return; }
+        if (!confirm(problema + ' Estás sin conexión. ¿Registrar la venta a crédito de todos modos?')) return;
+      }
+    }
+    CJ.imprimir = f.imprimir.checked;
+    DB.set('caja:imprimir', CJ.imprimir);
+    const E = CJ.estado;
+    const op = {
+      clase: 'VENTA', id: uuid(), corte_id: E.corte.id, almacen_id: E.corte.almacen_id, cliente_id: cli ? cli.id : '',
+      lineas: CJ.ticket.lineas.map(l => ({ producto_id: l.producto_id, cantidad: Number(l.cantidad), precio: Number(l.precio) })),
+      pagos: { efectivo: c.efectivo, tarjeta: v('tarjeta'), transferencia: v('transferencia'), credito }, recibido: c.efectivo > 0 ? c.recibido : 0
+    };
+    const local = Object.assign({}, op, {
+      fecha: new Date().toISOString(), total, cambio: c.efectivo > 0 ? Math.max(0, c.cambio) : 0, sync: 'pendiente',
+      cliente: cli ? cli.nombre : 'Público en general'
+    });
+    E.ventas.push(local);
+    if (credito > 0 && cli) { cli.saldo = Math.round((Number(cli.saldo || 0) + credito) * 100) / 100; DB.set('clientes', S.clientes); }
+    await guardarCaja();
+    await encolarCaja(op);
+    cerrarModal();
+    toast(c.efectivo > 0 && c.cambio > 0 ? `Venta registrada. Cambio: ${dinero(c.cambio)}` : 'Venta registrada.', 'ok');
+    if (CJ.imprimir) imprimirTicket(local);
+    alTerminar();
+  };
+}
+
+/* ---------- Impresión ---------- */
+function imprimirHTML(cuerpo) {
+  const ifr = document.createElement('iframe');
+  ifr.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:0';
+  document.body.appendChild(ifr);
+  const doc = ifr.contentDocument;
+  doc.open();
+  doc.write(`<!doctype html><html><head><meta charset="utf-8"><style>
+    @page { size: 80mm auto; margin: 3mm; }
+    body { font: 12px/1.35 "Courier New", monospace; width: 72mm; margin: 0; color: #000; }
+    h1 { font-size: 15px; text-align: center; margin: 0 0 2px; } .c { text-align: center; } .r { text-align: right; }
+    hr { border: 0; border-top: 1px dashed #000; margin: 6px 0; } table { width: 100%; border-collapse: collapse; }
+    td { vertical-align: top; padding: 1px 0; } .t td { font-size: 14px; font-weight: bold; } img { display: block; margin: 0 auto 4px; width: 90px; }
+  </style></head><body>${cuerpo}</body></html>`);
+  doc.close();
+  setTimeout(() => {
+    try { ifr.contentWindow.focus(); ifr.contentWindow.print(); } catch (e) { /* sin impresora */ }
+    setTimeout(() => ifr.remove(), 2000);
+  }, 250);
+}
+
+function encabezadoTicket(almacenId) {
+  const a = S.idx.alm[almacenId] || {};
+  return `<img src="icons/icon-192.png" alt=""><h1>${esc(CFG.NOMBRE)}</h1><div class="c">${esc(a.nombre || '')}${a.direccion ? '<br>' + esc(a.direccion) : ''}${a.telefono ? '<br>Tel. ' + esc(a.telefono) : ''}</div><hr>`;
+}
+
+function imprimirTicket(v) {
+  const filas = v.lineas.map(l => {
+    const p = S.idx.prod[l.producto_id] || {};
+    return `<tr><td colspan="2">${esc(p.nombre || '')}</td></tr><tr><td>${numero(l.cantidad)} x ${dinero(l.precio)}</td><td class="r">${dinero(l.cantidad * l.precio)}</td></tr>`;
+  }).join('');
+  const pg = v.pagos || {};
+  const linea = (t, n) => (Number(n) > 0 ? `<tr><td>${t}</td><td class="r">${dinero(n)}</td></tr>` : '');
+  imprimirHTML(`${encabezadoTicket(v.almacen_id)}
+    <div>Ticket: ${ticketCorto(v.id)}${v.folio ? ' · ' + esc(v.folio) : ''}<br>${fechaHora(v.fecha)}<br>Atendió: ${esc(S.usuario.nombre)}<br>Cliente: ${esc(v.cliente || 'Público en general')}</div><hr>
+    <table>${filas}</table><hr>
+    <table><tr class="t"><td>TOTAL</td><td class="r">${dinero(v.total)}</td></tr>
+    ${linea('Efectivo', pg.efectivo)}${linea('Tarjeta', pg.tarjeta)}${linea('Transferencia', pg.transferencia)}${linea('A crédito', pg.credito)}
+    ${Number(pg.efectivo) > 0 ? linea('Recibido', v.recibido) + `<tr><td>Cambio</td><td class="r">${dinero(v.cambio || 0)}</td></tr>` : ''}</table>
+    ${v.cancelada ? '<hr><div class="c"><b>VENTA CANCELADA</b></div>' : ''}
+    <hr><div class="c">¡Gracias por su compra!</div>`);
+}
+
+function imprimirCorte(c) {
+  const l = (t, n) => `<tr><td>${t}</td><td class="r">${dinero(n)}</td></tr>`;
+  imprimirHTML(`${encabezadoTicket(c.almacen_id)}
+    <div class="c"><b>CORTE DE CAJA</b></div><div>Cajero: ${esc(c.cajero || S.usuario.nombre)}<br>Apertura: ${fechaHora(c.apertura)}<br>Cierre: ${fechaHora(c.cierre)}</div><hr>
+    <table><tr><td>Ventas</td><td class="r">${c.ventas}</td></tr>${l('Total vendido', c.total_ventas)}${l('Efectivo', c.efectivo)}${l('Tarjeta', c.tarjeta)}
+    ${l('Transferencia', c.transferencia)}${l('A crédito', c.credito)}${l('Abonos en efectivo', c.abonos_efectivo)}${l('Abonos otros medios', c.abonos_otros)}</table><hr>
+    <table>${l('Fondo inicial', c.fondo)}${l('Efectivo esperado', c.esperado)}${l('Efectivo contado', c.contado)}
+    <tr class="t"><td>Diferencia</td><td class="r">${dinero(c.diferencia)}</td></tr></table>
+    ${c.notas ? `<hr><div>Notas: ${esc(c.notas)}</div>` : ''}<br><br><div class="c">______________________<br>Firma</div>`);
+}
+
+function imprimirAbono(a) {
+  imprimirHTML(`${encabezadoTicket(a.almacen_id)}<div class="c"><b>COMPROBANTE DE ABONO</b></div>
+    <div>${fechaHora(a.fecha)}<br>Cliente: ${esc(a.cliente)}<br>Recibió: ${esc(S.usuario.nombre)}</div><hr>
+    <table><tr class="t"><td>Abono</td><td class="r">${dinero(a.monto)}</td></tr><tr><td>Forma de pago</td><td class="r">${METODOS_CAJA[a.metodo] || a.metodo}</td></tr>
+    <tr><td>Saldo restante</td><td class="r">${dinero(a.saldo_restante)}</td></tr></table><hr><div class="c">¡Gracias!</div>`);
+}
+
+/* ---------- Ventas del turno, abonos y corte ---------- */
+function dlgVentasTurno(alCerrar) {
+  const E = CJ.estado;
+  const vs = E.ventas.slice().reverse();
+  const tot = vs.filter(v => !v.cancelada).reduce((s, v) => s + Number(v.total), 0);
+  const d = abrirModal('Ventas del turno', `
+    <div class="form">
+      <p><b>${plural(vs.filter(v => !v.cancelada).length, 'venta')}</b> · ${dinero(tot)}</p>
+      ${vs.length ? `<div class="tabla-cont"><table class="tabla"><thead><tr><th>Ticket</th><th>Hora</th><th>Cliente</th><th class="num">Total</th><th>Pago</th><th>Estado</th><th></th></tr></thead>
+        <tbody>${vs.map(v => {
+          const pg = v.pagos;
+          const formas = [['efectivo', 'Efectivo'], ['tarjeta', 'Tarjeta'], ['transferencia', 'Transf.'], ['credito', 'Crédito']].filter(([k]) => Number(pg[k]) > 0).map(x => x[1]).join(' + ');
+          const est = v.cancelada ? chipEstado('CANCELADA') : v.sync === 'error' ? '<span class="est est-ATRASADA">Error</span>' : v.sync === 'enviada' ? '<span class="est est-RECIBIDA">Enviada</span>' : '<span class="est est-BORRADOR">Por enviar</span>';
+          return `<tr><td><b>${ticketCorto(v.id)}</b>${v.folio ? `<small>${esc(v.folio)}</small>` : ''}</td><td>${new Date(v.fecha).toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' })}</td>
+            <td>${esc(v.cliente)}</td><td class="num">${dinero(v.total)}</td><td>${formas}</td><td>${est}${v.error ? `<small class="txt-error">${esc(v.error)}</small>` : ''}${v.aviso ? `<small>${esc(v.aviso)}</small>` : ''}</td>
+            <td class="acciones"><button type="button" class="btn mini sec" data-reimp="${esc(v.id)}">Reimprimir</button>
+            ${esAdminCaja() && !v.cancelada ? `<button type="button" class="btn mini peligro" data-canc="${esc(v.id)}">Cancelar</button>` : ''}</td></tr>`;
+        }).join('')}</tbody></table></div>` : '<p class="vacio">Aún no hay ventas en este turno.</p>'}
+    </div>`, true);
+  d.onclick = async e => {
+    const r = e.target.closest('[data-reimp]');
+    const c = e.target.closest('[data-canc]');
+    if (r) imprimirTicket(E.ventas.find(v => v.id === r.dataset.reimp));
+    if (c) {
+      const v = E.ventas.find(x => x.id === c.dataset.canc);
+      if (v.sync !== 'enviada') { toast('Primero debe enviarse al servidor (necesita conexión).', 'error'); return; }
+      const motivo = prompt('Motivo de la cancelación:');
+      if (!motivo) return;
+      try {
+        await conCarga('Cancelando…', () => api('cancelarVenta', { id: v.id, motivo }));
+        v.cancelada = new Date().toISOString();
+        if (Number(v.pagos.credito) > 0) { const cli = clientePorId(v.cliente_id); if (cli) cli.saldo = Math.max(0, Number(cli.saldo) - Number(v.pagos.credito)); }
+        await guardarCaja();
+        toast('Venta cancelada. La mercancía regresó al inventario.', 'ok');
+        sincronizar();
+        dlgVentasTurno(alCerrar);
+      } catch (err) { toast(err.message, 'error'); }
+    }
+  };
+  d.addEventListener('close', () => alCerrar && alCerrar(), { once: true });
+}
+
+function dlgAbono(clienteId, alTerminar) {
+  const E = CJ.estado;
+  const conSaldo = (S.clientes || []).filter(c => Number(c.saldo) > 0.005).sort(porNombre);
+  if (!conSaldo.length) { toast('Ningún cliente tiene saldo pendiente.', ''); return; }
+  const d = abrirModal('Cobrar abono', `
+    <form id="fab" class="form">
+      <label>Cliente<select name="cliente_id">${conSaldo.map(c => `<option value="${esc(c.id)}" ${c.id === clienteId ? 'selected' : ''}>${esc(c.nombre)} — saldo ${dinero(c.saldo)}</option>`).join('')}</select></label>
+      <div class="fila3"><label>Monto<input name="monto" type="number" step="0.01" min="0.01" required inputmode="decimal"></label>
+        <label>Forma de pago<select name="metodo">${Object.entries(METODOS_CAJA).map(([k, t]) => `<option value="${k}">${t}</option>`).join('')}</select></label>
+        <label>Referencia<input name="referencia"></label></div>
+      <label class="chk"><input type="checkbox" name="imprimir" ${CJ.imprimir ? 'checked' : ''}> Imprimir comprobante</label>
+      <p class="msg" id="fab-msg"></p>
+      <div class="pie"><button type="button" class="btn sec" data-cerrar>Cancelar</button><button class="btn" type="submit">Registrar abono</button></div>
+    </form>`);
+  const f = $('#fab', d);
+  const ponerSaldo = () => { f.monto.value = Number(clientePorId(f.cliente_id.value).saldo).toFixed(2); };
+  ponerSaldo();
+  f.cliente_id.onchange = ponerSaldo;
+  f.onsubmit = async ev => {
+    ev.preventDefault();
+    const cli = clientePorId(f.cliente_id.value);
+    const monto = Math.round(Number(f.monto.value) * 100) / 100;
+    if (!(monto > 0) || monto > Number(cli.saldo) + 0.01) { $('#fab-msg', d).textContent = `El abono debe ser entre $0.01 y ${dinero(cli.saldo)}.`; return; }
+    const op = { clase: 'ABONO', id: uuid(), cliente_id: cli.id, monto, metodo: f.metodo.value, referencia: f.referencia.value.trim(),
+      corte_id: E.corte ? E.corte.id : '', almacen_id: E.corte ? E.corte.almacen_id : (S.usuario.almacen_id || '') };
+    cli.saldo = Math.max(0, Math.round((Number(cli.saldo) - monto) * 100) / 100);
+    DB.set('clientes', S.clientes);
+    const local = Object.assign({}, op, { fecha: new Date().toISOString(), cliente: cli.nombre, saldo_restante: cli.saldo });
+    if (E.corte) E.abonos.push(local);
+    await guardarCaja();
+    await encolarCaja(op);
+    cerrarModal();
+    toast(`Abono registrado. Saldo de ${cli.nombre}: ${dinero(cli.saldo)}`, 'ok');
+    if (f.imprimir.checked) imprimirAbono(local);
+    if (alTerminar) alTerminar();
+  };
+}
+
+function resumenCorteLocal() {
+  const E = CJ.estado;
+  const vs = E.ventas.filter(v => !v.cancelada);
+  const s = (lista, f) => Math.round(lista.reduce((t, x) => t + (Number(f(x)) || 0), 0) * 100) / 100;
+  const r = {
+    almacen_id: E.corte.almacen_id, apertura: E.corte.apertura, fondo: Number(E.corte.fondo) || 0, ventas: vs.length,
+    total_ventas: s(vs, v => v.total), efectivo: s(vs, v => v.pagos.efectivo), tarjeta: s(vs, v => v.pagos.tarjeta),
+    transferencia: s(vs, v => v.pagos.transferencia), credito: s(vs, v => v.pagos.credito),
+    abonos_efectivo: s(E.abonos.filter(a => a.metodo === 'EFECTIVO'), a => a.monto), abonos_otros: s(E.abonos.filter(a => a.metodo !== 'EFECTIVO'), a => a.monto)
+  };
+  r.esperado = Math.round((r.fondo + r.efectivo + r.abonos_efectivo) * 100) / 100;
+  return r;
+}
+
+function dlgCerrarCaja(alTerminar) {
+  const r = resumenCorteLocal();
+  const fila = (t, n) => `<span>${t}</span><span>${dinero(n)}</span>`;
+  const d = abrirModal('Cerrar caja (corte)', `
+    <form id="fcorte" class="form">
+      <div class="corte-res">
+        <span>Ventas</span><span>${r.ventas}</span>${fila('Total vendido', r.total_ventas)}${fila('Efectivo', r.efectivo)}${fila('Tarjeta', r.tarjeta)}
+        ${fila('Transferencia', r.transferencia)}${fila('A crédito', r.credito)}${fila('Abonos en efectivo', r.abonos_efectivo)}${fila('Abonos otros medios', r.abonos_otros)}
+        ${fila('Fondo inicial', r.fondo)}<b>Efectivo esperado en caja</b><b>${dinero(r.esperado)}</b>
+      </div>
+      <label>Efectivo contado<input name="contado" type="number" step="0.01" min="0" required inputmode="decimal"></label>
+      <p id="fc-dif" class="cobro-res"></p>
+      <label>Notas<input name="notas" placeholder="Retiros, faltantes, observaciones"></label>
+      <label class="chk"><input type="checkbox" name="imprimir" ${CJ.imprimir ? 'checked' : ''}> Imprimir corte</label>
+      ${misPendientes().filter(o => o.clase && o.estado === 'pendiente').length ? '<p class="aviso-offline">Hay operaciones por enviar. El corte se enviará después de ellas, en orden.</p>' : ''}
+      <div class="pie"><button type="button" class="btn sec" data-cerrar>Regresar</button><button class="btn" type="submit">Cerrar caja</button></div>
+    </form>`);
+  const f = $('#fcorte', d);
+  f.contado.focus();
+  f.contado.oninput = () => {
+    const dif = Math.round(((Number(f.contado.value) || 0) - r.esperado) * 100) / 100;
+    $('#fc-dif', d).innerHTML = `<span>Diferencia</span><b class="${dif === 0 ? 'cambio' : 'txt-error'}">${dif > 0 ? 'Sobran ' : dif < 0 ? 'Faltan ' : ''}${dinero(Math.abs(dif))}</b>`;
+  };
+  f.onsubmit = async ev => {
+    ev.preventDefault();
+    const E = CJ.estado;
+    const contado = Math.round(Number(f.contado.value) * 100) / 100;
+    const op = { clase: 'CORTE_CERRAR', id: uuid(), corte_id: E.corte.id, contado, notas: f.notas.value.trim() };
+    const corte = Object.assign({}, r, { contado, diferencia: Math.round((contado - r.esperado) * 100) / 100, cierre: new Date().toISOString(), notas: op.notas, cajero: S.usuario.nombre });
+    await encolarCaja(op);
+    E.ultimoCorte = corte;
+    E.corte = null;
+    E.ventas = [];
+    E.abonos = [];
+    await guardarCaja();
+    cerrarModal();
+    toast('Caja cerrada.', 'ok');
+    if (f.imprimir.checked) imprimirCorte(corte);
+    alTerminar();
+  };
+}
+
+function dlgRechazadasCaja(alCerrar) {
+  const l = misPendientes().filter(o => o.clase && o.estado === 'rechazado');
+  const nombre = { VENTA: 'Venta', ABONO: 'Abono', CORTE_ABRIR: 'Apertura de caja', CORTE_CERRAR: 'Cierre de caja' };
+  const d = abrirModal('Operaciones rechazadas', `
+    <p class="nota">El servidor no aceptó estas operaciones. Revisa el motivo; puedes reintentarlas (por ejemplo, después de corregir un dato) o descartarlas.</p>
+    <ul class="lista">${l.map(o => `<li><div><b>${nombre[o.clase]}</b> · ${fechaHora(o.fecha)}${o.clase === 'VENTA' ? ' · ' + dinero(o.lineas.reduce((s, x) => s + x.cantidad * x.precio, 0)) : ''}
+      <small class="txt-error">${esc(o.error)}</small></div><span class="acciones"><button type="button" class="btn mini sec" data-reint="${esc(o.id)}">Reintentar</button>
+      <button type="button" class="btn mini peligro" data-desc="${esc(o.id)}">Descartar</button></span></li>`).join('')}</ul>`);
+  d.onclick = async e => {
+    const re = e.target.closest('[data-reint]'), de = e.target.closest('[data-desc]');
+    if (re) {
+      const o = S.outbox.find(x => x.id === re.dataset.reint && x.clase);
+      o.estado = 'pendiente'; delete o.error;
+      await DB.guardarMov(o);
+      cerrarModal();
+      sincronizar(true);
+    }
+    if (de && confirm('¿Descartar esta operación? No llegará al servidor.')) {
+      const o = S.outbox.find(x => x.id === de.dataset.desc && x.clase);
+      S.outbox = S.outbox.filter(x => x !== o);
+      await DB.borrarMov(o.id);
+      cerrarModal();
+      actualizarBarra();
+    }
+  };
+  d.addEventListener('close', () => alCerrar && alCerrar(), { once: true });
+}
+
+/* ---------- Ventas, cortes, clientes y por cobrar (administradores) ---------- */
+const VT = { pestana: 'ventas', desde: '', hasta: '', alm: '', ventas: null, cortes: null, cli: null, q: '' };
+
+function vVentas(el) {
+  if (!VT.desde) { VT.desde = hoyLocal(); VT.hasta = hoyLocal(); }
+  el.innerHTML = `<div class="titulo"><h2>Ventas y clientes</h2></div>
+    <div class="segmentos" id="vt-tabs">${[['ventas', 'Ventas'], ['cortes', 'Cortes de caja'], ['clientes', 'Clientes'], ['cobrar', 'Por cobrar']]
+      .map(([k, t]) => `<button type="button" data-t="${k}" class="${VT.pestana === k ? 'activo' : ''}">${t}</button>`).join('')}</div>
+    <div id="vt-cuerpo"></div>`;
+  const c = $('#vt-cuerpo', el);
+  const pintar = () => ({ ventas: pintarVentasRep, cortes: pintarCortes, clientes: pintarClientes, cobrar: pintarCobrar })[VT.pestana](c);
+  $('#vt-tabs', el).onclick = e => {
+    const b = e.target.closest('[data-t]');
+    if (!b) return;
+    VT.pestana = b.dataset.t;
+    $$('#vt-tabs button', el).forEach(x => x.classList.toggle('activo', x === b));
+    pintar();
+  };
+  VT.repintar = pintar;
+  S.refrescar = null;
+  pintar();
+}
+
+async function pedir(c, texto, fn) {
+  if (!navigator.onLine) { c.innerHTML = '<p class="aviso-offline">Esta sección necesita conexión.</p>'; return null; }
+  try { return await conCarga(texto, fn); } catch (e) {
+    c.innerHTML = `<p class="txt-error">${esc(e.message)}</p>`;
+    if (e.sesion) sesionVencida(e.message);
+    return null;
+  }
+}
+
+async function pintarVentasRep(c) {
+  const alms = esGeneral() ? S.catalogo.almacenes.slice().sort(porNombre) : [];
+  c.innerHTML = `<div class="filtros">
+      <label class="chk">Desde <input type="date" id="vt-desde" value="${VT.desde}"></label>
+      <label class="chk">Hasta <input type="date" id="vt-hasta" value="${VT.hasta}"></label>
+      ${alms.length ? `<select id="vt-alm"><option value="">Todas las sucursales</option>${alms.map(a => `<option value="${esc(a.id)}" ${VT.alm === a.id ? 'selected' : ''}>${esc(a.nombre)}</option>`).join('')}</select>` : ''}
+      <button type="button" class="btn sec" id="vt-buscar">Consultar</button><button type="button" class="btn sec" id="vt-xls">Exportar a Excel</button>
+    </div><div id="vt-res" class="tarjetas"></div><div id="vt-lista"></div>`;
+  const cargar = async () => {
+    VT.desde = $('#vt-desde', c).value; VT.hasta = $('#vt-hasta', c).value; VT.alm = ($('#vt-alm', c) || {}).value || '';
+    const r = await pedir($('#vt-lista', c), 'Consultando ventas…', () => api('ventas', { desde: VT.desde, hasta: VT.hasta, almacen_id: VT.alm }));
+    if (!r) return;
+    VT.ventas = r;
+    mostrar();
+  };
+  const mostrar = () => {
+    const vs = VT.ventas || [];
+    const ok = vs.filter(v => !v.cancelada);
+    const s = k => ok.reduce((t, v) => t + (Number(v[k]) || 0), 0);
+    $('#vt-res', c).innerHTML = `<div class="tarjeta"><span>Ventas</span><b>${ok.length}</b><small>${plural(vs.length - ok.length, 'cancelada')}</small></div>
+      <div class="tarjeta"><span>Total vendido</span><b>${dinero(s('total'))}</b></div>
+      <div class="tarjeta"><span>Utilidad bruta</span><b>${dinero(s('total') - s('costo_total'))}</b><small>${s('total') ? Math.round((1 - s('costo_total') / s('total')) * 1000) / 10 : 0}% sobre venta</small></div>
+      <div class="tarjeta"><span>Efectivo / Tarjeta</span><b>${dinero(s('efectivo'))}</b><small>${dinero(s('tarjeta'))} tarjeta</small></div>
+      <div class="tarjeta"><span>Transferencia / Crédito</span><b>${dinero(s('transferencia'))}</b><small>${dinero(s('credito'))} a crédito</small></div>`;
+    $('#vt-lista', c).innerHTML = vs.length ? `<div class="tabla-cont"><table class="tabla"><thead><tr><th>Folio</th><th>Fecha</th><th>Sucursal</th><th>Cajero</th><th>Cliente</th><th class="num">Total</th><th>Estado</th></tr></thead>
+      <tbody>${vs.slice().reverse().map(v => `<tr class="clic ${v.cancelada ? 'inactivo' : ''}" data-v="${esc(v.id)}"><td><b>${esc(v.folio)}</b><small>${ticketCorto(v.id)}</small></td><td>${fechaHora(v.fecha)}</td>
+        <td>${esc((S.idx.alm[v.almacen_id] || {}).nombre || '')}</td><td>${esc(v.cajero)}</td><td>${esc(clienteNombre(v.cliente_id))}</td><td class="num">${dinero(v.total)}</td>
+        <td>${v.cancelada ? chipEstado('CANCELADA') : v.estado === 'CREDITO' ? '<span class="est est-PARCIAL">Crédito</span>' : '<span class="est est-RECIBIDA">Pagada</span>'}</td></tr>`).join('')}</tbody></table></div>`
+      : '<p class="vacio">Sin ventas en ese periodo.</p>';
+  };
+  $('#vt-buscar', c).onclick = cargar;
+  $('#vt-xls', c).onclick = () => exportarVentas();
+  $('#vt-lista', c).onclick = e => {
+    const tr = e.target.closest('[data-v]');
+    if (tr) dlgVentaDetalle(VT.ventas.find(v => v.id === tr.dataset.v), () => cargar());
+  };
+  if (VT.ventas) mostrar(); else cargar();
+}
+
+const clienteNombre = id => (id ? ((VT.cli && VT.cli.clientes.find(c => c.id === id)) || clientePorId(id) || {}).nombre || 'Cliente' : 'Público en general');
+
+function dlgVentaDetalle(v, alCambiar) {
+  const d = abrirModal(`Venta ${v.folio}`, `<div class="form">
+    <div class="titulo"><span>${v.cancelada ? chipEstado('CANCELADA') : ''} ${fechaHora(v.fecha)} · ${esc(v.cajero)}</span><b>${dinero(v.total)}</b></div>
+    <p>Cliente: <b>${esc(clienteNombre(v.cliente_id))}</b> · Sucursal: ${esc((S.idx.alm[v.almacen_id] || {}).nombre || '')}</p>
+    <div class="tabla-cont"><table class="tabla"><thead><tr><th>Producto</th><th class="num">Cantidad</th><th class="num">Precio</th><th class="num">Importe</th><th class="num">Costo</th></tr></thead>
+      <tbody>${v.lineas.map(l => `<tr><td>${esc((S.idx.prod[l.producto_id] || {}).nombre || '')}</td><td class="num">${numero(l.cantidad)}</td><td class="num">${dinero(l.precio)}</td>
+        <td class="num">${dinero(l.importe)}</td><td class="num">${dinero(Number(l.costo) * Number(l.cantidad))}</td></tr>`).join('')}</tbody></table></div>
+    <p>Pagos: ${[['efectivo', 'Efectivo'], ['tarjeta', 'Tarjeta'], ['transferencia', 'Transferencia'], ['credito', 'Crédito']].filter(([k]) => Number(v[k]) > 0).map(([k, t]) => `${t} ${dinero(v[k])}`).join(' · ')}</p>
+    ${v.notas ? `<p class="nota">${esc(v.notas)}</p>` : ''}${v.cancelo ? `<p class="txt-error">Cancelada: ${esc(v.cancelo)}</p>` : ''}
+    <div class="acciones"><button type="button" class="btn sec" id="vd-imp">Reimprimir ticket</button>${v.cancelada ? '' : '<button type="button" class="btn peligro" id="vd-canc">Cancelar venta</button>'}</div></div>`, true);
+  $('#vd-imp', d).onclick = () => imprimirTicket({ id: v.id, folio: v.folio, fecha: v.fecha, almacen_id: v.almacen_id, cliente: clienteNombre(v.cliente_id),
+    lineas: v.lineas, total: v.total, pagos: { efectivo: v.efectivo, tarjeta: v.tarjeta, transferencia: v.transferencia, credito: v.credito },
+    recibido: v.recibido, cambio: v.cambio, cancelada: v.cancelada });
+  const cb = $('#vd-canc', d);
+  if (cb) cb.onclick = async () => {
+    const motivo = prompt('Motivo de la cancelación:');
+    if (!motivo) return;
+    try {
+      await conCarga('Cancelando…', () => api('cancelarVenta', { id: v.id, motivo }));
+      toast(`Venta ${v.folio} cancelada.`, 'ok');
+      cerrarModal();
+      sincronizar();
+      alCambiar();
+    } catch (e) { toast(e.message, 'error'); }
+  };
+}
+
+function exportarVentas() {
+  const vs = VT.ventas || [];
+  if (!vs.length) { toast('Primero consulta un periodo con ventas.', ''); return; }
+  const n = x => Math.round((Number(x) || 0) * 100) / 100;
+  const filas = [['Folio', 'Ticket', 'Fecha', 'Sucursal', 'Cajero', 'Cliente', 'Total', 'Costo', 'Utilidad', 'Efectivo', 'Tarjeta', 'Transferencia', 'Crédito', 'Estado']]
+    .concat(vs.map(v => [v.folio, ticketCorto(v.id), fechaHora(v.fecha), (S.idx.alm[v.almacen_id] || {}).nombre || '', v.cajero, clienteNombre(v.cliente_id),
+      n(v.total), n(v.costo_total), n(v.total - v.costo_total), n(v.efectivo), n(v.tarjeta), n(v.transferencia), n(v.credito), v.cancelada ? 'Cancelada' : v.estado === 'CREDITO' ? 'Crédito' : 'Pagada']));
+  const det = [['Folio', 'Fecha', 'Código', 'Producto', 'Cantidad', 'Precio', 'Importe', 'Costo unitario']];
+  vs.filter(v => !v.cancelada).forEach(v => v.lineas.forEach(l => {
+    const p = S.idx.prod[l.producto_id] || {};
+    det.push([v.folio, fechaHora(v.fecha), p.codigo || '', p.nombre || '', Number(l.cantidad), n(l.precio), n(l.importe), n(l.costo)]);
+  }));
+  Excel.descargar(Excel.crearXlsx([
+    { nombre: 'Ventas', filas, encabezado: true, anchos: [11, 10, 16, 18, 16, 24, 11, 11, 11, 11, 11, 13, 11, 10] },
+    { nombre: 'Detalle', filas: det, encabezado: true, anchos: [11, 16, 10, 30, 9, 10, 11, 12], columnasTexto: [2] }
+  ]), `ventas-${VT.desde}-a-${VT.hasta}.xlsx`);
+}
+
+async function pintarCortes(c) {
+  c.innerHTML = '<div id="ct-lista"></div>';
+  const r = await pedir(c, 'Consultando cortes…', () => api('cortes', {}));
+  if (!r) return;
+  VT.cortes = r;
+  c.innerHTML = r.length ? `<div class="tabla-cont"><table class="tabla"><thead><tr><th>Apertura</th><th>Cierre</th><th>Sucursal</th><th>Cajero</th><th class="num">Ventas</th>
+    <th class="num">Total</th><th class="num">Esperado</th><th class="num">Contado</th><th class="num">Diferencia</th><th></th></tr></thead>
+    <tbody>${r.map(k => `<tr><td>${fechaHora(k.apertura)}</td><td>${k.estado === 'CERRADO' ? fechaHora(k.cierre) : '<span class="est est-ENVIADA">Abierta</span>'}</td>
+      <td>${esc((S.idx.alm[k.almacen_id] || {}).nombre || '')}</td><td>${esc(k.cajero)}</td><td class="num">${k.estado === 'CERRADO' ? k.ventas : ''}</td>
+      <td class="num">${k.estado === 'CERRADO' ? dinero(k.total_ventas) : ''}</td><td class="num">${k.estado === 'CERRADO' ? dinero(k.esperado) : ''}</td>
+      <td class="num">${k.estado === 'CERRADO' ? dinero(k.contado) : ''}</td><td class="num ${Number(k.diferencia) ? 'txt-error' : ''}">${k.estado === 'CERRADO' ? dinero(k.diferencia) : ''}</td>
+      <td>${k.estado === 'CERRADO' ? `<button type="button" class="btn mini sec" data-imp="${esc(k.id)}">Imprimir</button>` : ''}</td></tr>`).join('')}</tbody></table></div>
+    <p class="nota">Cortes de los últimos 31 días.</p>` : '<p class="vacio">Sin cortes de caja.</p>';
+  c.onclick = e => {
+    const b = e.target.closest('[data-imp]');
+    if (b) imprimirCorte(VT.cortes.find(k => k.id === b.dataset.imp));
+  };
+}
+
+async function cargarClientesAdm(c) {
+  const r = await pedir(c, 'Cargando clientes…', () => api('clientes'));
+  if (r) VT.cli = r;
+  return r;
+}
+
+async function pintarClientes(c) {
+  if (!VT.cli && !(await cargarClientesAdm(c))) return;
+  const D = VT.cli;
+  const q = normal(VT.q);
+  const l = D.clientes.filter(x => !q || normal(x.nombre + ' ' + (x.telefono || '') + ' ' + (x.rfc || '')).includes(q)).sort(porNombre);
+  c.innerHTML = `<div class="filtros"><input id="cl-q" type="search" placeholder="Buscar cliente" value="${esc(VT.q)}"><button type="button" class="btn" id="cl-nuevo">Nuevo cliente</button></div>
+    ${l.length ? `<div class="tabla-cont"><table class="tabla"><thead><tr><th>Cliente</th><th>Tipo</th><th>Teléfono</th><th>Crédito</th><th class="num">Saldo</th><th class="num">Vencido</th></tr></thead>
+      <tbody>${l.map(x => `<tr class="clic ${x.activo ? '' : 'inactivo'}" data-cl="${esc(x.id)}"><td><b>${esc(x.nombre)}</b>${x.rfc ? `<small>${esc(x.rfc)}</small>` : ''}</td>
+        <td>${x.tipo === 'MAYOREO' ? 'Mayoreo' : 'Menudeo'}</td><td>${esc(x.telefono || '—')}</td>
+        <td>${x.credito ? `${dinero(x.limite_credito)} · ${x.dias_credito} días` : '—'}</td><td class="num">${dinero(x.saldo)}</td>
+        <td class="num ${x.vencido > 0 ? 'txt-error' : ''}">${dinero(x.vencido)}</td></tr>`).join('')}</tbody></table></div>` : '<p class="vacio">Sin clientes.</p>'}`;
+  const qi = $('#cl-q', c);
+  qi.oninput = () => { VT.q = qi.value; const p = qi.selectionStart; pintarClientes(c).then(() => { const n = $('#cl-q', c); n.focus(); n.setSelectionRange(p, p); }); };
+  $('#cl-nuevo', c).onclick = () => dlgCliente(null, () => pintarClientes(c));
+  c.onclick = e => {
+    const tr = e.target.closest('[data-cl]');
+    if (tr) dlgCliente(D.clientes.find(x => x.id === tr.dataset.cl), () => pintarClientes(c));
+  };
+}
+
+function dlgCliente(cl, alGuardar) {
+  const nuevo = !cl;
+  cl = cl || { tipo: 'MENUDEO', credito: false, activo: true, limite_credito: 0, dias_credito: 15 };
+  const precios = nuevo ? [] : VT.cli.precios.filter(p => p.cliente_id === cl.id);
+  const d = abrirModal(nuevo ? 'Nuevo cliente' : cl.nombre, `
+    <form id="fcl" class="form">
+      <div class="fila2"><label>Nombre<input name="nombre" required value="${esc(cl.nombre || '')}"></label>
+        <label>Tipo de precio<select name="tipo"><option value="MENUDEO" ${cl.tipo !== 'MAYOREO' ? 'selected' : ''}>Menudeo</option><option value="MAYOREO" ${cl.tipo === 'MAYOREO' ? 'selected' : ''}>Mayoreo</option></select></label></div>
+      <div class="fila3"><label>Teléfono<input name="telefono" type="tel" value="${esc(cl.telefono || '')}"></label>
+        <label>Correo<input name="email" type="email" value="${esc(cl.email || '')}"></label><label>RFC<input name="rfc" value="${esc(cl.rfc || '')}"></label></div>
+      <label>Dirección<input name="direccion" value="${esc(cl.direccion || '')}"></label>
+      <label class="chk"><input type="checkbox" name="credito" ${cl.credito ? 'checked' : ''}> Tiene crédito autorizado</label>
+      <div class="fila2" id="cl-cred"><label>Límite de crédito<input name="limite_credito" type="number" step="0.01" min="0" value="${cl.limite_credito || 0}"></label>
+        <label>Días para pagar<input name="dias_credito" type="number" step="1" min="0" value="${cl.dias_credito || 0}"></label></div>
+      <div class="fila2"><label>Notas<input name="notas" value="${esc(cl.notas || '')}"></label><label class="chk"><input type="checkbox" name="activo" ${cl.activo !== false ? 'checked' : ''}> Activo</label></div>
+      <p class="msg" id="fcl-msg"></p>
+      <div class="pie"><button type="button" class="btn sec" data-cerrar>Cancelar</button><button class="btn" type="submit">Guardar</button></div>
+    </form>
+    ${nuevo ? '<p class="nota">Después de guardarlo podrás asignarle precios especiales.</p>' : `<div class="panel-sub"><b>Precios especiales</b>
+      <p class="nota">Tienen prioridad sobre el precio de menudeo y mayoreo para este cliente.</p>
+      <div id="pe-sel"></div><div class="fila-form"><input id="pe-precio" type="number" step="0.01" min="0" placeholder="Precio especial"><button type="button" class="btn sec" id="pe-add">Asignar</button></div>
+      <ul class="lista" id="pe-lista"></ul></div>`}`, true);
+  const f = $('#fcl', d);
+  const cred = () => { $('#cl-cred', d).hidden = !f.credito.checked; };
+  cred();
+  f.credito.onchange = cred;
+  f.onsubmit = async ev => {
+    ev.preventDefault();
+    try {
+      const r = await conCarga('Guardando…', () => api('guardarCliente', { cliente: {
+        id: cl.id || uuid(), nuevo, nombre: f.nombre.value.trim(), tipo: f.tipo.value, telefono: f.telefono.value.trim(), email: f.email.value.trim(),
+        rfc: f.rfc.value.trim(), direccion: f.direccion.value.trim(), credito: f.credito.checked, limite_credito: f.limite_credito.value,
+        dias_credito: f.dias_credito.value, notas: f.notas.value.trim(), activo: f.activo.checked
+      } }));
+      upsert(VT.cli.clientes, r);
+      upsert(S.clientes = S.clientes || [], r);
+      DB.set('clientes', S.clientes);
+      cerrarModal();
+      toast('Cliente guardado.', 'ok');
+      alGuardar();
+    } catch (e) { $('#fcl-msg', d).textContent = e.message; }
+  };
+  if (nuevo) return;
+  const pintarPE = () => {
+    $('#pe-lista', d).innerHTML = precios.length ? precios.map(p => {
+      const pr = S.idx.prod[p.producto_id] || {};
+      return `<li><span>${esc(pr.nombre || '—')} <small>Menudeo ${dinero(pr.precio_menudeo)} · Mayoreo ${dinero(pr.precio_mayoreo)}</small></span>
+        <span class="acciones"><b>${dinero(p.precio)}</b><button type="button" class="btn mini peligro" data-qpe="${esc(p.producto_id)}">Quitar</button></span></li>`;
+    }).join('') : '<li class="nota">Sin precios especiales.</li>';
+  };
+  pintarPE();
+  const sel = selectorProducto($('#pe-sel', d), p => { if (p) $('#pe-precio', d).focus(); });
+  const guardarPE = async (productoId, precio) => {
+    try {
+      const r = await conCarga('Guardando…', () => api('guardarPrecioEspecial', { cliente_id: cl.id, producto_id: productoId, precio }));
+      VT.cli.precios = VT.cli.precios.filter(p => p.cliente_id !== cl.id).concat(r);
+      precios.length = 0; r.forEach(x => precios.push(x));
+      S.precios = (S.precios || []).filter(p => p.cliente_id !== cl.id).concat(r);
+      DB.set('precios', S.precios);
+      pintarPE();
+    } catch (e) { toast(e.message, 'error'); }
+  };
+  $('#pe-add', d).onclick = () => {
+    const p = sel.elegido, precio = $('#pe-precio', d).value;
+    if (!p || precio === '') { toast('Elige un producto y escribe el precio.', 'error'); return; }
+    guardarPE(p.id, precio).then(() => { sel.limpiar(); $('#pe-precio', d).value = ''; });
+  };
+  $('#pe-lista', d).onclick = e => {
+    const b = e.target.closest('[data-qpe]');
+    if (b) guardarPE(b.dataset.qpe, '');
+  };
+}
+
+async function pintarCobrar(c) {
+  if (!(await cargarClientesAdm(c))) return;
+  const D = VT.cli, hoy = hoyLocal();
+  const abiertas = D.cuentas.filter(x => Number(x.saldo) > 0.005 && x.estado !== 'CANCELADA')
+    .sort((a, b) => String(a.vence).localeCompare(String(b.vence)));
+  const tot = abiertas.reduce((s, x) => s + Number(x.saldo), 0);
+  const venc = abiertas.filter(x => String(x.vence) < hoy).reduce((s, x) => s + Number(x.saldo), 0);
+  c.innerHTML = `<div class="tarjetas"><div class="tarjeta"><span>Por cobrar</span><b>${dinero(tot)}</b><small>${plural(abiertas.length, 'cuenta')}</small></div>
+      <div class="tarjeta ${venc ? 'alerta-roja' : ''}"><span>Vencido</span><b>${dinero(venc)}</b></div></div>
+    ${abiertas.length ? `<div class="tabla-cont"><table class="tabla"><thead><tr><th>Cliente</th><th>Venta</th><th>Fecha</th><th>Vence</th><th class="num">Monto</th><th class="num">Saldo</th><th>Estado</th><th></th></tr></thead>
+      <tbody>${abiertas.map(x => `<tr><td><b>${esc(clienteNombre(x.cliente_id))}</b></td><td>${esc(x.folio)}</td><td>${fechaCorta(x.fecha_cuenta)}</td><td>${fechaCorta(x.vence)}</td>
+        <td class="num">${dinero(x.monto)}</td><td class="num"><b>${dinero(x.saldo)}</b></td>
+        <td>${String(x.vence) < hoy ? '<span class="est cxp-VENCIDA">Vencida</span>' : x.estado === 'PARCIAL' ? '<span class="est cxp-PARCIAL">Abonada</span>' : '<span class="est cxp-PENDIENTE">Pendiente</span>'}</td>
+        <td><button type="button" class="btn mini sec" data-abonar="${esc(x.cliente_id)}">Abonar</button></td></tr>`).join('')}</tbody></table></div>` : '<p class="vacio">No hay cuentas por cobrar.</p>'}`;
+  c.onclick = e => {
+    const b = e.target.closest('[data-abonar]');
+    if (!b) return;
+    const cli = D.clientes.find(x => x.id === b.dataset.abonar);
+    const dd = abrirModal(`Abono de ${cli.nombre}`, `<form id="aba" class="form">
+      <p>Saldo: <b>${dinero(cli.saldo)}</b>. El abono se aplica a las cuentas más antiguas primero.</p>
+      <div class="fila3"><label>Monto<input name="monto" type="number" step="0.01" min="0.01" value="${Number(cli.saldo).toFixed(2)}"></label>
+        <label>Forma de pago<select name="metodo">${['TRANSFERENCIA', 'EFECTIVO', 'TARJETA', 'CHEQUE', 'OTRO'].map(m => `<option value="${m}">${METODO_TXT[m]}</option>`).join('')}</select></label>
+        <label>Referencia<input name="referencia"></label></div>
+      <p class="msg" id="aba-msg"></p>
+      <div class="pie"><button type="button" class="btn sec" data-cerrar>Cancelar</button><button class="btn" type="submit">Registrar abono</button></div></form>`);
+    $('#aba', dd).onsubmit = async ev => {
+      ev.preventDefault();
+      const f = ev.target;
+      try {
+        const r = await conCarga('Registrando…', () => api('registrarCaja', { operaciones: [{ clase: 'ABONO', id: uuid(), cliente_id: cli.id, monto: f.monto.value, metodo: f.metodo.value, referencia: f.referencia.value.trim() }] }));
+        const res = r.resultados[0];
+        if (res.estado === 'rechazado') throw new Error(res.error);
+        cerrarModal();
+        toast('Abono registrado.', 'ok');
+        VT.cli = null;
+        sincronizar();
+        pintarCobrar(c);
+      } catch (err) { $('#aba-msg', dd).textContent = err.message; }
+    };
+  };
+}
+
 /* ---- Almacenes ---- */
 function vAlmacenes(el) {
   el.innerHTML = `<div class="titulo"><h2>Almacenes y sucursales</h2><div class="acciones"><button type="button" class="btn" id="btn-nuevo">Nuevo almacén</button></div></div><div id="lista" class="tarjetas grandes"></div>`;
@@ -2510,6 +3438,9 @@ async function iniciar() {
     promptInstalar = e;
     const b = $('#b-inst');
     if (b) b.hidden = false;
+  });
+  document.addEventListener('keydown', e => {
+    if (e.key === 'F2' && S.vista === 'caja' && !$('#dlg').open) { e.preventDefault(); const b = $('#cj-cobrar'); if (b && !b.disabled) b.click(); }
   });
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible' && S.usuario && navigator.onLine &&
