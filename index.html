@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0172B6">
+<title>Control de Inventario</title>
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div id="carga" class="carga"><img src="cargando.svg" alt=""><p id="carga-txt">Cargando…</p></div>
+<section id="pantalla-login" class="login" hidden>
+  <form id="form-login" class="login-caja">
+    <img src="icons/icon-192.png" alt="" width="120" height="120">
+    <h1 id="login-titulo">Control de Inventario</h1>
+    <label>Usuario<input name="usuario" autocomplete="username" autocapitalize="none" required></label>
+    <label>Contraseña<input name="password" type="password" autocomplete="current-password" required></label>
+    <button class="btn" type="submit">Entrar</button>
+    <p id="login-msg" class="msg"></p>
+    <p id="login-estado" class="nota"></p>
+  </form>
+</section>
+
+<div id="pantalla-app" hidden>
+  <header class="cab">
+    <div class="marca"><img src="icons/icon-192.png" alt="" width="64" height="64"><span id="app-nombre">Control de Inventario</span></div>
+    <button id="estado" class="estado" type="button" title="Sincronizar ahora"></button>
+  </header>
+  <nav id="menu" class="menu"></nav>
+  <main id="vista" class="vista"></main>
+</div>
+
+<dialog id="dlg"></dialog>
+<div id="toasts" class="toasts" aria-live="polite"></div>
+
+<script src="config.js"></script>
+<script src="excel.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
