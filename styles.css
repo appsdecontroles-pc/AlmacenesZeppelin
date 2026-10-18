@@ -541,3 +541,46 @@ label.btn { display: inline-flex; align-items: center; justify-content: center; 
 @media (max-width: 640px) { #cj-donde { width: 100%; } }
 .dh-acc { white-space: nowrap; text-align: right; }
 .dh-acc .btn + .btn { margin-left: 6px; }
+
+/* ---- Ventanas ajustadas a la pantalla ----
+   Nunca más altas que la pantalla; si algo no cabe, solo se desplaza el contenido y los botones
+   (Confirmar, Guardar, Cancelar) quedan siempre visibles abajo. */
+dialog { max-height: calc(100dvh - 16px); }
+dialog[open] { display: flex; flex-direction: column; }
+.dlg-cab { flex: none; }
+.dlg-cuerpo { flex: 1 1 auto; min-height: 0; overflow: auto; overscroll-behavior: contain; }
+.dlg-cuerpo .pie { position: sticky; bottom: -16px; z-index: 2; background: var(--panel); margin: 0 0 -16px; padding: 10px 0 16px; }
+dialog.medio { width: min(900px, calc(100vw - 24px)); }
+/* Dos columnas en pantallas anchas para que la ventana no crezca hacia abajo */
+.form.dos-col { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: .8em 24px; align-items: start; }
+.form.dos-col > .col { display: flex; flex-direction: column; gap: .8em; min-width: 0; }
+.form.dos-col > :not(.col) { grid-column: 1 / -1; }
+.form.dos-col > .msg:empty { display: none; }
+@media (max-width: 760px) { .form.dos-col { display: flex; flex-direction: column; } }
+.fila-credito { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: end; }
+#fp .prod-media { grid-template-columns: 1fr; }
+#fp .prod-foto { width: 100%; height: 150px; }
+/* Pantallas bajas (laptops): todo más compacto */
+@media (max-height: 820px) {
+  dialog { max-height: calc(100dvh - 10px); }
+  .dlg-cab { padding: 10px 14px 4px; }
+  .dlg-cuerpo { padding: 4px 14px 12px; }
+  .dlg-cuerpo .pie { bottom: -12px; margin-bottom: -12px; padding: 8px 0 12px; }
+  .form, .form.dos-col > .col { gap: .5em; }
+  .form.dos-col { row-gap: .5em; }
+  input, select, textarea { padding: .4em .6em; }
+  .cobro-total { padding: 6px 10px; }
+  .cobro-total b { font-size: 1.75rem; }
+  .billetes button { padding: .35em; }
+  .cobro-res, .corte-res { padding: 6px 10px; }
+  #fp .prod-foto { height: 110px; }
+  .logo-prev { width: 72px; height: 72px; }
+  .fondo-prev { height: 72px; }
+}
+/* Cobro en celular: campos de dos en dos para que todo quepa */
+#fcob .fila2 { grid-template-columns: 1fr 1fr; }
+@media (max-width: 640px) {
+  #fcob .cobro-total { padding: 6px 10px; }
+  #fcob .cobro-total b { font-size: 1.7rem; }
+  #fcob .billetes button { padding: .35em; }
+}

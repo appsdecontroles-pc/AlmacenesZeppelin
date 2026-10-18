@@ -5,7 +5,7 @@
 
 const CFG = Object.assign({ NOMBRE: 'Control de Inventario', SYNC_MINUTOS: 15, API_URL: '' }, window.APP_CONFIG || {});
 CFG.NOMBRE_ORIGINAL = CFG.NOMBRE;
-const VERSION_APP = '5.4.0';
+const VERSION_APP = '5.4.1';
 
 const ROL_TXT = {
   ADMIN_GENERAL: 'Administrador general',
@@ -134,7 +134,8 @@ function toast(msg, tipo = '') {
 
 function abrirModal(titulo, html, ancho = false) {
   const d = $('#dlg');
-  d.classList.toggle('ancho', ancho);
+  d.classList.toggle('ancho', ancho === true);
+  d.classList.toggle('medio', ancho === 'medio');
   d.onclick = null;
   d.innerHTML = `<form method="dialog" class="dlg-cab"><h2>${esc(titulo)}</h2><button class="icono" aria-label="Cerrar">✕</button></form><div class="dlg-cuerpo">${html}</div>`;
   if (!d.open) d.showModal();
@@ -742,20 +743,13 @@ function dlgProducto(p, codigoBarras = '') {
   const alms = almacenesVisibles();
   const val = v => (v === undefined || v === null || v === '' ? '' : esc(v));
   const d = abrirModal(nuevo ? 'Nuevo producto' : (puede ? 'Editar producto' : 'Producto'), `
-    <form id="fp" class="form">
+    <form id="fp" class="form dos-col">
+      <div class="col">
       <div class="fila2">
         <label>Código interno<input name="codigo" value="${val(p.codigo)}" placeholder="Automático" ${ro}></label>
         <label>Código de barras<input name="codigo_barras" value="${val(p.codigo_barras)}" inputmode="numeric" ${ro}></label>
       </div>
       <label>Nombre<input name="nombre" required value="${val(p.nombre)}" ${ro}></label>
-      <div class="prod-media">
-        <div class="prod-foto" id="fp-foto">${p.imagen ? `<img data-img="${esc(p.imagen)}" alt="">` : '<span>Sin imagen</span>'}</div>
-        <div class="prod-media-der">
-          <label>Descripción <small>(se ve en la caja)</small><textarea name="descripcion" rows="3" maxlength="600" ${ro}>${val(p.descripcion)}</textarea></label>
-          ${puede ? `<div class="acciones"><label class="btn mini sec">${p.imagen ? 'Cambiar imagen' : 'Agregar imagen'}<input type="file" accept="image/*" id="fp-img" hidden></label>
-            <button type="button" class="btn mini sec" id="fp-img-quitar" ${p.imagen ? '' : 'hidden'}>Quitar imagen</button></div>` : ''}
-        </div>
-      </div>
       <div class="fila2">
         <label>Categoría<select name="categoria_id" ${ro}><option value="">Sin categoría</option>${cats.map(c => `<option value="${esc(c.id)}" ${c.id === p.categoria_id ? 'selected' : ''}>${esc(c.nombre)}</option>`).join('')}</select></label>
         <label>Unidad<input name="unidad" list="unidades" value="${val(p.unidad || 'PZA')}" ${ro}></label>
@@ -771,11 +765,22 @@ function dlgProducto(p, codigoBarras = '') {
         <label>Stock mínimo<input name="stock_minimo" type="number" step="any" min="0" value="${val(p.stock_minimo)}" ${ro}></label>
         <label class="chk"><input type="checkbox" name="activo" ${esActivo(p.activo) ? 'checked' : ''} ${ro}> Activo</label>
       </div>
+      </div>
+      <div class="col">
+      <div class="prod-media">
+        <div class="prod-foto" id="fp-foto">${p.imagen ? `<img data-img="${esc(p.imagen)}" alt="">` : '<span>Sin imagen</span>'}</div>
+        <div class="prod-media-der">
+          <label>Descripción <small>(se ve en la caja)</small><textarea name="descripcion" rows="3" maxlength="600" ${ro}>${val(p.descripcion)}</textarea></label>
+          ${puede ? `<div class="acciones"><label class="btn mini sec">${p.imagen ? 'Cambiar imagen' : 'Agregar imagen'}<input type="file" accept="image/*" id="fp-img" hidden></label>
+            <button type="button" class="btn mini sec" id="fp-img-quitar" ${p.imagen ? '' : 'hidden'}>Quitar imagen</button></div>` : ''}
+        </div>
+      </div>
       ${!nuevo && alms.length ? (() => { const red = mapaRed(); const ver = almacenesActivos().filter(a => alms.some(x => x.id === a.id) || (red[a.id + '|' + p.id] || 0) > 0);
         return `<div class="existencias"><b>Existencias</b>${ver.map(a => `<span>${esc(a.nombre)}: <b>${numero(red[a.id + '|' + p.id] || 0)}</b> ${esc(p.unidad || '')}</span>`).join('')}</div>`; })() : ''}
+      </div>
       <p class="msg" id="fp-msg"></p>
       ${puede ? `<div class="pie">${!nuevo && esGeneral() ? '<button type="button" class="btn peligro izq" id="fp-del">Eliminar</button>' : ''}<button type="button" class="btn sec" data-cerrar>Cancelar</button><button class="btn" type="submit">Guardar</button></div>` : ''}
-    </form>`);
+    </form>`, 'medio');
   const f = $('#fp', d);
   cargarImgs($('#fp-foto', d));
   let imagenNueva = null;   // data URL elegido, '' = quitar, null = sin cambio
@@ -3038,26 +3043,30 @@ function dlgCobrar(alTerminar) {
   const disp = creditoDisponible(cli);
   const vencido = cli && Number(cli.vencido) > 0;
   const d = abrirModal('Cobrar', `
-    <form id="fcob" class="form" autocomplete="off">
-      <div class="cobro-total"><span>Total a cobrar</span><b>${dinero(total)}</b><small>${esc(cli ? cli.nombre : 'Público en general')}</small></div>
-      <label>Efectivo recibido<input name="recibido" type="number" step="0.01" min="0" inputmode="decimal" placeholder="0.00"></label>
-      <div class="billetes">${['Exacto', 20, 50, 100, 200, 500, 1000].map(b => `<button type="button" data-b="${b}">${b === 'Exacto' ? b : '$' + b}</button>`).join('')}</div>
-      <div class="fila3">
-        <label>Tarjeta<input name="tarjeta" type="number" step="0.01" min="0" inputmode="decimal" placeholder="0.00"></label>
-        <label>Transferencia<input name="transferencia" type="number" step="0.01" min="0" inputmode="decimal" placeholder="0.00"></label>
-        ${cli && cli.credito ? `<label>Crédito <small>${vencido ? '<span class="txt-error">tiene saldo vencido</span>' : 'disponible ' + dinero(disp)}</small>
-          <input name="credito" type="number" step="0.01" min="0" inputmode="decimal" placeholder="0.00"></label>` : ''}
+    <form id="fcob" class="form dos-col" autocomplete="off">
+      <div class="col">
+        <div class="cobro-total"><span>Total a cobrar</span><b>${dinero(total)}</b><small>${esc(cli ? cli.nombre : 'Público en general')}</small></div>
+        <label>Efectivo recibido<input name="recibido" type="number" step="0.01" min="0" inputmode="decimal" placeholder="0.00"></label>
+        <div class="billetes">${['Exacto', 20, 50, 100, 200, 500, 1000].map(b => `<button type="button" data-b="${b}">${b === 'Exacto' ? b : '$' + b}</button>`).join('')}</div>
+        <div class="cobro-res" id="cob-res"></div>
       </div>
-      ${cli && cli.credito ? '<div class="acciones"><button type="button" class="btn mini sec" id="cob-credito">Todo a crédito</button></div>' : ''}
-      <div class="cobro-res" id="cob-res"></div>
-      <div class="fila2">
-        <label>Ticket<select name="ticket"><option value="0">No imprimir</option><option value="1">Imprimir</option><option value="2">Imprimir doble</option></select></label>
-        <label>Enviar ticket por correo <small>(opcional)</small><input name="correo" type="email" list="cob-mails" placeholder="correo@ejemplo.com" autocomplete="off"></label>
+      <div class="col">
+        <div class="fila2">
+          <label>Tarjeta<input name="tarjeta" type="number" step="0.01" min="0" inputmode="decimal" placeholder="0.00"></label>
+          <label>Transferencia<input name="transferencia" type="number" step="0.01" min="0" inputmode="decimal" placeholder="0.00"></label>
+        </div>
+        ${cli && cli.credito ? `<div class="fila-credito"><label>Crédito <small>${vencido ? '<span class="txt-error">tiene saldo vencido</span>' : 'disponible ' + dinero(disp)}</small>
+          <input name="credito" type="number" step="0.01" min="0" inputmode="decimal" placeholder="0.00"></label>
+          <button type="button" class="btn sec" id="cob-credito">Todo a crédito</button></div>` : ''}
+        <div class="fila2">
+          <label>Ticket<select name="ticket"><option value="0">No imprimir</option><option value="1">Imprimir</option><option value="2">Imprimir doble</option></select></label>
+          <label>Ticket por correo<input name="correo" type="email" list="cob-mails" placeholder="opcional" autocomplete="off"></label>
+        </div>
       </div>
       <datalist id="cob-mails">${cli && cli.email ? `<option value="${esc(cli.email)}">` : ''}</datalist>
       <p class="msg" id="cob-msg"></p>
       <div class="pie"><button type="button" class="btn sec" data-cerrar>Regresar</button><button class="btn" type="submit">Confirmar venta</button></div>
-    </form>`);
+    </form>`, 'medio');
   const f = $('#fcob', d), msg = $('#cob-msg', d);
   f.ticket.value = IMP.auto ? String(IMP.copias) : '0';
   const v = n => Math.round((Number(f[n] ? f[n].value : 0) || 0) * 100) / 100;
@@ -3506,8 +3515,9 @@ function dlgTicket(v) {
 function dlgImpresora(alCerrar) {
   const sel = { usb: IMP.usb, ble: IMP.ble };
   const d = abrirModal('Impresora de tickets', `
-    <form id="fimp" class="form">
-      <p class="nota">Esta configuración se guarda en este equipo. Cada caja puede tener la suya.</p>
+    <form id="fimp" class="form dos-col">
+      <p class="nota completo">Esta configuración se guarda en este equipo. Cada caja puede tener la suya.</p>
+      <div class="col">
       <label>Cómo se conecta la impresora<select name="modo">
         <option value="sistema">Ventana de impresión (computadora o cualquier impresora)</option>
         <option value="usb">USB directo (tablet con hub o cable OTG)</option>
@@ -3529,17 +3539,6 @@ function dlgImpresora(alCerrar) {
           <li>Aquí presiona "Imprimir prueba". La primera vez Android pregunta con qué app abrir: elige RawBT y "Siempre".</li>
         </ol>
       </div>
-      <div class="fila2">
-        <label>Ancho del papel<select name="ancho"><option value="80">80 mm</option><option value="58">58 mm</option></select></label>
-        <label>Al cobrar<select name="copias"><option value="0">No imprimir</option><option value="1">Imprimir ticket</option><option value="2">Imprimir ticket doble</option></select></label>
-      </div>
-      <label class="chk"><input type="checkbox" name="logo"> Imprimir el logo</label>
-      <label>Mensaje al pie del ticket<input name="pie" maxlength="120"></label>
-      <div class="imp-directo">
-        <label class="chk"><input type="checkbox" name="cajon"> Abrir el cajón de dinero al cobrar en efectivo (cajón conectado a la impresora)</label>
-        <label class="chk"><input type="checkbox" name="sinAcentos"> Quitar acentos (si la impresora imprime símbolos raros en lugar de á, é, ñ)</label>
-      </div>
-      <div class="acciones"><button type="button" class="btn sec" id="imp-prueba">Imprimir prueba</button><button type="button" class="btn sec imp-directo" id="imp-cajon">Probar cajón</button></div>
       <details class="ayuda imp-modo" data-m="sistema"><summary>¿Cómo imprimir directo desde una computadora, sin la ventana de impresión?</summary>
         <ol>
           <li>Conecta la impresora de tickets e instala su controlador.</li>
@@ -3552,9 +3551,23 @@ function dlgImpresora(alCerrar) {
         <p class="nota">Así los tickets salen solos en la impresora predeterminada. Si usas Edge, cambia la ruta de Chrome por esta:</p>
         <code>"C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe"</code>
       </details>
+      </div>
+      <div class="col col-imp">
+      <div class="fila2">
+        <label>Ancho del papel<select name="ancho"><option value="80">80 mm</option><option value="58">58 mm</option></select></label>
+        <label>Al cobrar<select name="copias"><option value="0">No imprimir</option><option value="1">Imprimir ticket</option><option value="2">Imprimir ticket doble</option></select></label>
+      </div>
+      <label class="chk"><input type="checkbox" name="logo"> Imprimir el logo</label>
+      <label>Mensaje al pie del ticket<input name="pie" maxlength="120"></label>
+      <div class="imp-directo">
+        <label class="chk"><input type="checkbox" name="cajon"> Abrir el cajón de dinero al cobrar en efectivo (cajón conectado a la impresora)</label>
+        <label class="chk"><input type="checkbox" name="sinAcentos"> Quitar acentos (si la impresora imprime símbolos raros en lugar de á, é, ñ)</label>
+      </div>
+      <div class="acciones"><button type="button" class="btn sec" id="imp-prueba">Imprimir prueba</button><button type="button" class="btn sec imp-directo" id="imp-cajon">Probar cajón</button></div>
+      </div>
       <p class="msg" id="fimp-msg"></p>
       <div class="pie"><button type="button" class="btn sec" data-cerrar>Cancelar</button><button class="btn" type="submit">Guardar</button></div>
-    </form>`);
+    </form>`, 'medio');
   const f = $('#fimp', d), msg = $('#fimp-msg', d);
   f.modo.value = IMP.modo || 'sistema';
   f.ancho.value = String(IMP.ancho);
@@ -3719,19 +3732,21 @@ function dlgCerrarCaja(alTerminar) {
   const r = resumenCorteLocal();
   const fila = (t, n) => `<span>${t}</span><span>${dinero(n)}</span>`;
   const d = abrirModal('Cerrar caja (corte)', `
-    <form id="fcorte" class="form">
-      <div class="corte-res">
+    <form id="fcorte" class="form dos-col">
+      <div class="col"><div class="corte-res">
         <span>Ventas</span><span>${r.ventas}</span>${fila('Total vendido', r.total_ventas)}${fila('Efectivo', r.efectivo)}${fila('Tarjeta', r.tarjeta)}
         ${fila('Transferencia', r.transferencia)}${fila('A crédito', r.credito)}${fila('Abonos en efectivo', r.abonos_efectivo)}${fila('Abonos otros medios', r.abonos_otros)}
         ${fila('Fondo inicial', r.fondo)}<b>Efectivo esperado en caja</b><b>${dinero(r.esperado)}</b>
-      </div>
+      </div></div>
+      <div class="col">
       <label>Efectivo contado<input name="contado" type="number" step="0.01" min="0" required inputmode="decimal"></label>
       <p id="fc-dif" class="cobro-res"></p>
       <label>Notas<input name="notas" placeholder="Retiros, faltantes, observaciones"></label>
       <label class="chk"><input type="checkbox" name="imprimir" ${IMP.auto ? 'checked' : ''}> Imprimir corte</label>
       ${misPendientes().filter(o => o.clase && o.estado === 'pendiente').length ? '<p class="aviso-offline">Hay operaciones por enviar. El corte se enviará después de ellas, en orden.</p>' : ''}
+      </div>
       <div class="pie"><button type="button" class="btn sec" data-cerrar>Regresar</button><button class="btn" type="submit">Cerrar caja</button></div>
-    </form>`);
+    </form>`, 'medio');
   const f = $('#fcorte', d);
   f.contado.focus();
   f.contado.oninput = () => {
@@ -5086,28 +5101,34 @@ function dlgApariencia() {
   let logo = actual.logo || '', fondo = actual.fondo || '';
   let logoCambio = false, fondoCambio = false;
   const d = abrirModal('Apariencia de la app', `
-    <form id="fap" class="form">
-      <p class="nota">Se aplica en todos los equipos de la empresa. Los cambios se ven aquí mismo antes de guardar.</p>
+    <form id="fap" class="form dos-col">
+      <p class="nota completo">Se aplica en todos los equipos de la empresa. Los cambios se ven aquí mismo antes de guardar.</p>
+      <div class="col">
       <label>Nombre que aparece en la app<input name="nombre" maxlength="60" value="${esc(c.nombre)}" placeholder="${esc(CFG.NOMBRE_ORIGINAL)}"></label>
       <div class="campo"><span>Logo (app, tickets y órdenes de compra)</span>
         <div class="fila-form"><img id="ap-logo" class="logo-prev" alt="" src="${esc(logo || LOGO_APP)}">
           <div class="acciones"><label class="btn sec">Cambiar logo<input type="file" accept="image/png,image/jpeg" id="ap-logo-arch" hidden></label>
           <button type="button" class="btn sec" id="ap-logo-quitar">Usar el original</button></div></div></div>
-      <div class="fila3">
+      <div class="fila2">
         <label>Color principal<input name="primario" type="color" value="${esc(c.primario)}"></label>
         <label>Color de acento<input name="acento" type="color" value="${esc(c.acento)}"></label>
+      </div>
+      <div class="fila2">
         <label>Tema<select name="tema"><option value="auto">Automático (según el equipo)</option><option value="claro">Claro</option><option value="oscuro">Oscuro</option></select></label>
+        <label>Tamaño de letra<select name="letra">${LETRAS.map(([v, t]) => `<option value="${v}">${t}</option>`).join('')}</select></label>
       </div>
       <div class="acciones"><button type="button" class="btn mini sec" id="ap-marca">Colores de la marca</button></div>
-      <label>Tamaño de letra<select name="letra">${LETRAS.map(([v, t]) => `<option value="${v}">${t}</option>`).join('')}</select></label>
+      </div>
+      <div class="col">
       <div class="campo"><span>Imagen de fondo</span>
         <div class="fila-form"><div id="ap-fondo" class="fondo-prev"></div>
           <div class="acciones"><label class="btn sec">Elegir imagen<input type="file" accept="image/*" id="ap-fondo-arch" hidden></label>
           <button type="button" class="btn sec" id="ap-fondo-quitar">Sin imagen</button></div></div></div>
       <label id="ap-velo-l">Qué tanto se ve la imagen<input name="velo" type="range" min="40" max="95" step="1" value="${135 - Number(c.velo)}"></label>
+      </div>
       <p class="msg" id="fap-msg"></p>
       <div class="pie"><button type="button" class="btn sec" data-cerrar>Cancelar</button><button class="btn" type="submit">Guardar</button></div>
-    </form>`);
+    </form>`, 'medio');
   const f = $('#fap', d), msg = $('#fap-msg', d);
   f.tema.value = c.tema;
   f.letra.value = String(LETRAS.reduce((m, [v]) => (Math.abs(v - c.letra) < Math.abs(m - c.letra) ? v : m), 1));

@@ -203,6 +203,14 @@ Al actualizar el servidor a esta versión hay que ejecutar **instalar** otra vez
 
 **Traspasos entre sucursales:** la solicitud llega a la sección **Pedidos** del almacén que surte, sea la bodega o una sucursal. Su administrador la acepta, la surte (sale de su inventario) y la sucursal que pidió confirma la entrega (entra a su inventario).
 
+## Ventanas ajustadas a la pantalla
+
+Las ventanas (cobro, producto, impresora, corte, apariencia, etc.) nunca son más altas que la pantalla:
+
+- En pantallas anchas acomodan sus campos en dos columnas.
+- En laptops y tablets usan un modo compacto.
+- Si algo no cabe (por ejemplo en celular), solo se desplaza el contenido y los botones de Confirmar o Guardar quedan siempre visibles abajo.
+
 ## Cómo funciona sin internet
 
 - Al entrar y cada 15 minutos, la app descarga catálogo, precios y existencias, y los guarda en el equipo.
