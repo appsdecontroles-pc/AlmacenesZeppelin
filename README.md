@@ -127,6 +127,44 @@ Al actualizar el servidor a esta versión hay que ejecutar **instalar** otra vez
 
 Al actualizar el servidor a esta versión hay que ejecutar **instalar** otra vez.
 
+## Eliminar productos
+
+En **Productos** (solo administrador general):
+
+- **Selección:** marca las casillas de la lista, o filtra por categoría y usa "Seleccionar toda la categoría". También hay un botón **Eliminar** en la ficha de cada producto.
+- **Qué se borra:** los productos sin historial se borran.
+  - Los que ya tienen ventas, compras o pedidos se **desactivan** para no perder el historial; se ven con "Ver inactivos".
+  - La casilla "Borrar también sus entradas, salidas y existencias" borra los que solo tienen movimientos de inventario (útil para un catálogo importado por error).
+- **Confirmación:** hay que escribir ELIMINAR.
+
+## Impresora de tickets
+
+En **Caja > ⚙ Impresora** o **Mi cuenta > Configurar impresora**. Se guarda en cada equipo.
+
+**Cómo se conecta:**
+
+| Modo | Para qué | Notas |
+|---|---|---|
+| Ventana de impresión | Computadora o cualquier impresora con controlador | Para que no salga la ventana: impresora predeterminada en Windows y acceso directo con `--kiosk-printing` (las instrucciones vienen en el cuadro). |
+| USB directo | Tablet Android con hub USB-C o cable OTG, o computadora con Chrome | Se elige la impresora una vez. Sin ventana. |
+| Bluetooth directo | Impresoras Bluetooth de bajo consumo (BLE) | Cada vez que se abre la app hay que tocar "Conectar impresora" en la caja. Si la impresora no aparece en la lista, usa Bluetooth clásico: elige RawBT. |
+| App RawBT | Bluetooth clásico, USB o red (IP, puerto 9100) | Instala RawBT desde Play Store y configura ahí la impresora. La app le pasa cada ticket. |
+
+**Opciones:**
+
+- **Papel:** ancho 58 u 80 mm.
+- **Al cobrar:** no imprimir, ticket o ticket doble. La segunda copia sale marcada como COPIA, con corte entre una y otra.
+- **Contenido:** logo y mensaje al pie.
+- **Solo en modos directos:** abrir el cajón de dinero al cobrar en efectivo (el cajón va conectado a la impresora) y "Quitar acentos", si la impresora imprime símbolos raros.
+- **Si falla la impresión directa:** se abre la ventana de impresión para no perder el ticket.
+
+**Botones en la caja:**
+
+- **Imprimir ticket:** imprime la última venta, sencilla o doble, o la envía por correo. En "Ventas del turno", el botón "Ticket" hace lo mismo con cualquier venta.
+- **Abrir cajón:** aparece cuando está activada esa opción.
+
+**Correo:** se puede escribir al cobrar. Si la venta se hizo sin internet, el correo sale solo cuando la venta llega al servidor.
+
 ## Cómo funciona sin internet
 
 - Al entrar y cada 15 minutos, la app descarga catálogo, precios y existencias, y los guarda en el equipo.
@@ -143,4 +181,4 @@ Al actualizar el servidor a esta versión hay que ejecutar **instalar** otra vez
 | Administrador de sucursal | Ver su sucursal, registrar movimientos, crear cajeros y personal de inventarios |
 | Control de inventarios | Editar catálogo y registrar movimientos en su almacén |
 | Cajero | Consultar productos, precios y existencias de su sucursal (sin costos) |
-| Cliente | Reservado para la fase 5 |
+| Cliente | Portal: hacer pedidos, ver sus pedidos y su estado de cuenta |

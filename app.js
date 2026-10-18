@@ -4,7 +4,7 @@
  * Servidor: Google Apps Script (API) + Google Sheets (base de datos). */
 
 const CFG = Object.assign({ NOMBRE: 'Control de Inventario', SYNC_MINUTOS: 15, API_URL: '' }, window.APP_CONFIG || {});
-const VERSION_APP = '5.0.0';
+const VERSION_APP = '5.2.0';
 
 const ROL_TXT = {
   ADMIN_GENERAL: 'Administrador general',
@@ -581,6 +581,8 @@ function vInicio(el) {
 /* ---- Productos ---- */
 function vProductos(el) {
   const puede = puedeCatalogo();
+  const borra = esGeneral();
+  F.psel = F.psel || new Set();
   const cats = S.catalogo.categorias.filter(c => esActivo(c.activo)).sort(porNombre);
   el.innerHTML = `
     <div class="titulo"><h2>Productos</h2>${puede ? `<div class="acciones"><button type="button" class="btn sec" id="btn-cats">Categorías</button><button type="button" class="btn sec" id="btn-importar">Importar Excel</button><button type="button" class="btn" id="btn-nuevo">Nuevo producto</button></div>` : ''}</div>
@@ -589,8 +591,29 @@ function vProductos(el) {
       <select id="f-cat"><option value="">Todas las categorías</option>${cats.map(c => `<option value="${esc(c.id)}" ${F.pcat === c.id ? 'selected' : ''}>${esc(c.nombre)}</option>`).join('')}</select>
       <label class="chk"><input type="checkbox" id="f-inact" ${F.pinact ? 'checked' : ''}> Ver inactivos</label>
     </div>
+    ${borra ? '<div class="barra-sel" id="p-sel" hidden></div>' : ''}
     <div id="lista"></div>`;
 
+  let filtrados = [];
+  const pintarSel = () => {
+    if (!borra) return;
+    S.catalogo.productos.length && [...F.psel].forEach(id => { if (!S.idx.prod[id]) F.psel.delete(id); });
+    const n = F.psel.size, b = $('#p-sel', el);
+    const fuera = filtrados.filter(p => !F.psel.has(p.id)).length;
+    b.hidden = !n && !F.pcat;
+    b.innerHTML = n ? `<b>${plural(n, 'producto')} ${n === 1 ? 'seleccionado' : 'seleccionados'}</b>
+      ${fuera ? `<button type="button" class="btn mini sec" id="ps-todos">Seleccionar los ${numero(filtrados.length)} de la lista</button>` : ''}
+      <button type="button" class="btn mini sec" id="ps-quitar">Quitar selección</button>
+      <button type="button" class="btn mini peligro" id="ps-borrar">Eliminar seleccionados</button>`
+      : F.pcat && filtrados.length ? `<span>Categoría <b>${esc((S.idx.cat[F.pcat] || {}).nombre || '')}</b>: ${plural(filtrados.length, 'producto')}</span>
+      <button type="button" class="btn mini sec" id="ps-todos">Seleccionar toda la categoría</button>` : '';
+    const chkTodos = $('#ps-pag', el);
+    if (chkTodos) {
+      const vis = $$('[data-sel]', el);
+      chkTodos.checked = vis.length > 0 && vis.every(c => c.checked);
+      chkTodos.indeterminate = !chkTodos.checked && vis.some(c => c.checked);
+    }
+  };
   const pintar = () => {
     const q = normal(F.pq || '');
     const ex = mapaExistencias();
@@ -598,15 +621,17 @@ function vProductos(el) {
     let lista = S.catalogo.productos
       .filter(p => (F.pinact || esActivo(p.activo)) && (!F.pcat || p.categoria_id === F.pcat) && (!q || coincide(p, q)))
       .sort(porNombre);
+    filtrados = lista;
     const total = lista.length;
     lista = lista.slice(0, 300);
     $('#lista', el).innerHTML = total ? `
       <div class="tabla-cont"><table class="tabla">
-        <thead><tr><th>Código</th><th>Producto</th><th>Categoría</th>${veCostos() ? '<th class="num">Costo</th>' : ''}<th class="num">Menudeo</th><th class="num">Mayoreo</th><th class="num">Existencia</th></tr></thead>
+        <thead><tr>${borra ? '<th class="col-sel"><input type="checkbox" id="ps-pag" title="Seleccionar los de esta página"></th>' : ''}<th>Código</th><th>Producto</th><th>Categoría</th>${veCostos() ? '<th class="num">Costo</th>' : ''}<th class="num">Menudeo</th><th class="num">Mayoreo</th><th class="num">Existencia</th></tr></thead>
         <tbody>${lista.map(p => {
           const c = alms.reduce((s, a) => s + (ex[a.id + '|' + p.id] || 0), 0);
           const bajo = Number(p.stock_minimo) > 0 && c < Number(p.stock_minimo);
-          return `<tr data-id="${esc(p.id)}" class="clic ${esActivo(p.activo) ? '' : 'inactivo'}">
+          return `<tr data-id="${esc(p.id)}" class="clic ${esActivo(p.activo) ? '' : 'inactivo'} ${F.psel.has(p.id) ? 'sel' : ''}">
+            ${borra ? `<td class="col-sel"><input type="checkbox" data-sel="${esc(p.id)}" ${F.psel.has(p.id) ? 'checked' : ''}></td>` : ''}
             <td>${esc(p.codigo)}${p.codigo_barras ? `<small>${esc(p.codigo_barras)}</small>` : ''}</td>
             <td>${esc(p.nombre)}</td>
             <td>${esc(S.idx.cat[p.categoria_id] ? S.idx.cat[p.categoria_id].nombre : '—')}</td>
@@ -617,9 +642,20 @@ function vProductos(el) {
         }).join('')}</tbody></table></div>
       ${total > 300 ? `<p class="nota">Mostrando 300 de ${total}. Afina la búsqueda.</p>` : ''}`
       : `<p class="vacio">${S.catalogo.productos.length ? 'Sin resultados.' : 'Aún no hay productos registrados.'}</p>`;
+    pintarSel();
   };
   pintar();
   S.refrescar = pintar;
+  if (borra) {
+    $('#p-sel', el).onclick = e => {
+      const b = e.target.closest('button');
+      if (!b) return;
+      if (b.id === 'ps-todos') filtrados.forEach(p => F.psel.add(p.id));
+      if (b.id === 'ps-quitar') F.psel.clear();
+      if (b.id === 'ps-borrar') return dlgEliminarProductos([...F.psel], () => { F.psel.clear(); pintar(); });
+      pintar();
+    };
+  }
 
   const q = $('#f-q', el);
   q.oninput = () => { F.pq = q.value; pintar(); };
@@ -635,6 +671,17 @@ function vProductos(el) {
   $('#f-cat', el).onchange = e => { F.pcat = e.target.value; pintar(); };
   $('#f-inact', el).onchange = e => { F.pinact = e.target.checked; pintar(); };
   $('#lista', el).onclick = e => {
+    if (e.target.closest('.col-sel')) {
+      const c = e.target.closest('.col-sel').querySelector('input');
+      if (e.target !== c) c.checked = !c.checked;
+      if (c.id === 'ps-pag') $$('[data-sel]', el).forEach(x => { x.checked = c.checked; });
+      $$('[data-sel]', el).forEach(x => {
+        F.psel[x.checked ? 'add' : 'delete'](x.dataset.sel);
+        x.closest('tr').classList.toggle('sel', x.checked);
+      });
+      pintarSel();
+      return;
+    }
     const tr = e.target.closest('tr[data-id]');
     if (tr) dlgProducto(S.idx.prod[tr.dataset.id]);
   };
@@ -644,6 +691,40 @@ function vProductos(el) {
     $('#btn-importar', el).onclick = dlgImportar;
   }
   if (!F.pq) q.focus();
+}
+
+function dlgEliminarProductos(ids, alTerminar) {
+  if (!ids.length) return;
+  if (!navigator.onLine) { toast('Necesitas conexión para eliminar productos.', 'error'); return; }
+  const ex = mapaExistencias();
+  const conExist = ids.filter(id => Object.keys(ex).some(k => k.endsWith('|' + id) && ex[k] !== 0)).length;
+  const nombres = ids.slice(0, 8).map(id => esc((S.idx.prod[id] || {}).nombre || '')).join(', ') + (ids.length > 8 ? ` y ${numero(ids.length - 8)} más` : '');
+  const d = abrirModal('Eliminar productos', `
+    <form id="fdel" class="form">
+      <p>Vas a eliminar <b>${plural(ids.length, 'producto')}</b>: ${nombres}.</p>
+      ${conExist ? `<p class="aviso-caja">${plural(conExist, 'producto')} todavía ${conExist === 1 ? 'tiene' : 'tienen'} existencia en algún almacén.</p>` : ''}
+      <p class="nota">Los productos que ya tienen ventas, compras o pedidos no se borran: se desactivan para no perder el historial. Dejan de aparecer en la lista y en la caja, y puedes verlos con "Ver inactivos".</p>
+      <label class="chk"><input type="checkbox" name="hist"> Borrar también sus entradas, salidas y existencias (solo para productos capturados por error)</label>
+      <label>Para confirmar escribe <b>ELIMINAR</b><input name="conf" autocomplete="off" required></label>
+      <p class="msg" id="fdel-msg"></p>
+      <div class="pie"><button type="button" class="btn sec" data-cerrar>Cancelar</button><button class="btn peligro" type="submit">Eliminar</button></div>
+    </form>`);
+  const f = $('#fdel', d);
+  f.conf.focus();
+  f.onsubmit = async ev => {
+    ev.preventDefault();
+    if (f.conf.value.trim().toUpperCase() !== 'ELIMINAR') { $('#fdel-msg', d).textContent = 'Escribe ELIMINAR para confirmar.'; return; }
+    try {
+      const r = await conCarga('Eliminando productos…', () => api('eliminarProductos', { ids, borrarHistorial: f.hist.checked }));
+      cerrarModal();
+      const partes = [];
+      if (r.eliminados) partes.push(`${plural(r.eliminados, 'producto')} ${r.eliminados === 1 ? 'eliminado' : 'eliminados'}`);
+      if (r.desactivados) partes.push(`${plural(r.desactivados, 'producto')} con historial ${r.desactivados === 1 ? 'desactivado' : 'desactivados'}`);
+      toast(partes.join(' · ') + '.', 'ok');
+      await sincronizar();
+      alTerminar && alTerminar();
+    } catch (e) { $('#fdel-msg', d).textContent = e.message; }
+  };
 }
 
 function dlgProducto(p, codigoBarras = '') {
@@ -679,9 +760,11 @@ function dlgProducto(p, codigoBarras = '') {
       </div>
       ${!nuevo && alms.length ? `<div class="existencias"><b>Existencias</b>${alms.map(a => `<span>${esc(a.nombre)}: <b>${numero(ex[a.id + '|' + p.id] || 0)}</b> ${esc(p.unidad || '')}</span>`).join('')}</div>` : ''}
       <p class="msg" id="fp-msg"></p>
-      ${puede ? `<div class="pie"><button type="button" class="btn sec" data-cerrar>Cancelar</button><button class="btn" type="submit">Guardar</button></div>` : ''}
+      ${puede ? `<div class="pie">${!nuevo && esGeneral() ? '<button type="button" class="btn peligro izq" id="fp-del">Eliminar</button>' : ''}<button type="button" class="btn sec" data-cerrar>Cancelar</button><button class="btn" type="submit">Guardar</button></div>` : ''}
     </form>`);
   const f = $('#fp', d);
+  const bdel = $('#fp-del', d);
+  if (bdel) bdel.onclick = () => dlgEliminarProductos([p.id], () => { if (F.psel) F.psel.delete(p.id); S.refrescar && S.refrescar(); });
   const margen = () => {
     if (!f.costo) return;
     const c = Number(f.costo.value), pm = Number(f.precio_menudeo.value), pM = Number(f.precio_mayoreo.value);
@@ -2339,7 +2422,14 @@ function exportarMes() {
 
 /* ---- Punto de venta (fase 4) ---- */
 const METODOS_CAJA = { EFECTIVO: 'Efectivo', TARJETA: 'Tarjeta', TRANSFERENCIA: 'Transferencia' };
-const CJ = { estado: null, ticket: { cliente_id: '', lineas: [] }, cat: '', q: '', imprimir: true };
+const CJ = { estado: null, ticket: { cliente_id: '', lineas: [] }, cat: '', q: '' };
+// Impresora de tickets: se configura por equipo (Mi cuenta o Caja > Impresora)
+const IMP = { modo: 'sistema', ancho: 80, copias: 1, auto: true, logo: true, pie: '¡Gracias por su compra!', cajon: false, sinAcentos: false, usb: null, ble: null };
+async function cargarImpresora() {
+  const g = await DB.get('impresora');
+  if (g) Object.assign(IMP, g);
+  else { const viejo = await DB.get('caja:imprimir'); if (viejo === false) IMP.auto = false; }
+}
 let secuenciaOp = 0;
 
 const esAdminCaja = () => ['ADMIN_GENERAL', 'ADMIN_SUCURSAL'].includes(rol());
@@ -2360,8 +2450,6 @@ const ticketCorto = id => String(id).replace(/-/g, '').slice(0, 8).toUpperCase()
 
 async function cargarCaja() {
   CJ.estado = (await DB.get('caja:' + S.usuario.usuario)) || { corte: null, ventas: [], abonos: [], ultimoCorte: null };
-  const imp = await DB.get('caja:imprimir');
-  CJ.imprimir = imp !== false;
 }
 const guardarCaja = () => DB.set('caja:' + S.usuario.usuario, CJ.estado);
 
@@ -2388,6 +2476,7 @@ function resultadoCaja(op, res) {
       v.sync = res.estado === 'rechazado' ? 'error' : 'enviada';
       v.error = res.error || '';
       if (res.aviso) v.aviso = res.aviso;
+      if (v.correo && res.estado !== 'rechazado') enviarCorreoTicket(v, v.correo);
     }
   }
   if (op.clase === 'CORTE_CERRAR' && res.corte) CJ.estado.ultimoCorteServidor = res.corte;
@@ -2409,9 +2498,13 @@ function vCaja(el) {
     ${avisoRech}
     <div class="caja-top">
       <div><b>Caja · ${esc(alm.nombre || '')}</b><small>Abierta ${fechaHora(E.corte.apertura)} · Fondo ${dinero(E.corte.fondo)} · ${plural(E.ventas.filter(v => !v.cancelada).length, 'venta')}</small></div>
-      <div class="acciones"><button type="button" class="btn sec" id="cj-ventas">Ventas del turno</button>
+      <div class="acciones"><button type="button" class="btn sec" id="cj-ticket">Imprimir ticket</button>
+        <button type="button" class="btn sec" id="cj-ventas">Ventas del turno</button>
         <button type="button" class="btn sec" id="cj-abono">Cobrar abono</button>
-        <button type="button" class="btn sec" id="cj-cerrar">Cerrar caja</button></div>
+        <button type="button" class="btn sec" id="cj-cerrar">Cerrar caja</button>
+        ${IMP.modo === 'ble' && !impresoraBLELista() ? '<button type="button" class="btn" id="cj-ble">Conectar impresora</button>' : ''}
+        ${modoDirecto() && IMP.cajon ? '<button type="button" class="btn sec" id="cj-cajon">Abrir cajón</button>' : ''}
+        <button type="button" class="btn sec icono-txt" id="cj-imp" title="Configurar impresora">⚙ Impresora</button></div>
     </div>
     <div class="caja">
       <section class="caja-buscar">
@@ -2544,6 +2637,22 @@ function vCaja(el) {
   $('#cj-cobrar2', el).onclick = () => $('#cj-cobrar', el).click();
   $('#cj-ver', el).onclick = () => $('.caja-ticket', el).scrollIntoView({ behavior: 'smooth', block: 'start' });
   $('#cj-ventas', el).onclick = () => dlgVentasTurno(() => vCaja(el));
+  $('#cj-ticket', el).onclick = () => {
+    const v = E.ventas.filter(x => !x.cancelada).slice(-1)[0];
+    if (!v) { toast('Aún no hay ventas en este turno.', ''); return; }
+    dlgTicket(v);
+  };
+  $('#cj-imp', el).onclick = () => dlgImpresora(() => vCaja(el));
+  const bcj = $('#cj-cajon', el);
+  if (bcj) bcj.onclick = abrirCajon;
+  const bble = $('#cj-ble', el);
+  if (bble) bble.onclick = async () => {
+    try {
+      await elegirBLE(true);
+      toast('Impresora conectada.', 'ok');
+      vCaja(el);
+    } catch (e) { if (e.name !== 'NotFoundError') toast('No se pudo conectar la impresora: ' + e.message, 'error'); }
+  };
   $('#cj-abono', el).onclick = () => dlgAbono(null, () => vCaja(el));
   $('#cj-cerrar', el).onclick = () => dlgCerrarCaja(() => vCaja(el));
   const rech = $('#cj-rech', el);
@@ -2651,11 +2760,16 @@ function dlgCobrar(alTerminar) {
       </div>
       ${cli && cli.credito ? '<div class="acciones"><button type="button" class="btn mini sec" id="cob-credito">Todo a crédito</button></div>' : ''}
       <div class="cobro-res" id="cob-res"></div>
-      <label class="chk"><input type="checkbox" name="imprimir" ${CJ.imprimir ? 'checked' : ''}> Imprimir ticket</label>
+      <div class="fila2">
+        <label>Ticket<select name="ticket"><option value="0">No imprimir</option><option value="1">Imprimir</option><option value="2">Imprimir doble</option></select></label>
+        <label>Enviar ticket por correo <small>(opcional)</small><input name="correo" type="email" list="cob-mails" placeholder="correo@ejemplo.com" autocomplete="off"></label>
+      </div>
+      <datalist id="cob-mails">${cli && cli.email ? `<option value="${esc(cli.email)}">` : ''}</datalist>
       <p class="msg" id="cob-msg"></p>
       <div class="pie"><button type="button" class="btn sec" data-cerrar>Regresar</button><button class="btn" type="submit">Confirmar venta</button></div>
     </form>`);
   const f = $('#fcob', d), msg = $('#cob-msg', d);
+  f.ticket.value = IMP.auto ? String(IMP.copias) : '0';
   const v = n => Math.round((Number(f[n] ? f[n].value : 0) || 0) * 100) / 100;
   const calcular = () => {
     const otros = Math.round((v('tarjeta') + v('transferencia') + v('credito')) * 100) / 100;
@@ -2693,8 +2807,9 @@ function dlgCobrar(alTerminar) {
         if (!confirm(problema + ' Estás sin conexión. ¿Registrar la venta a crédito de todos modos?')) return;
       }
     }
-    CJ.imprimir = f.imprimir.checked;
-    DB.set('caja:imprimir', CJ.imprimir);
+    const correo = f.correo.value.trim().toLowerCase();
+    if (correo && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(correo)) { msg.textContent = 'El correo para el ticket no es válido.'; return; }
+    const copias = Number(f.ticket.value);
     const E = CJ.estado;
     const op = {
       clase: 'VENTA', id: uuid(), corte_id: E.corte.id, almacen_id: E.corte.almacen_id, cliente_id: cli ? cli.id : '',
@@ -2703,7 +2818,7 @@ function dlgCobrar(alTerminar) {
     };
     const local = Object.assign({}, op, {
       fecha: new Date().toISOString(), total, cambio: c.efectivo > 0 ? Math.max(0, c.cambio) : 0, sync: 'pendiente',
-      cliente: cli ? cli.nombre : 'Público en general'
+      cliente: cli ? cli.nombre : 'Público en general', correo: correo || undefined
     });
     E.ventas.push(local);
     if (credito > 0 && cli) { cli.saldo = Math.round((Number(cli.saldo || 0) + credito) * 100) / 100; DB.set('clientes', S.clientes); }
@@ -2711,70 +2826,506 @@ function dlgCobrar(alTerminar) {
     await encolarCaja(op);
     cerrarModal();
     toast(c.efectivo > 0 && c.cambio > 0 ? `Venta registrada. Cambio: ${dinero(c.cambio)}` : 'Venta registrada.', 'ok');
-    if (CJ.imprimir) imprimirTicket(local);
+    const cajon = c.efectivo > 0;
+    if (copias) imprimirTicket(local, copias, cajon);
+    else if (cajon) abrirCajon();
+    if (correo && !(navigator.onLine && S.online)) toast(`El ticket se enviará a ${correo} al volver la conexión.`, '');
     alTerminar();
   };
 }
 
 /* ---------- Impresión ---------- */
-function imprimirHTML(cuerpo) {
+// Los tickets se describen como una lista de renglones (doc) y se convierten a HTML (ventana de impresión)
+// o a comandos ESC/POS (impresión directa por USB, Bluetooth o RawBT).
+
+// Ventana de impresión del sistema. copias: cada tanto sale en su propia hoja (la térmica corta entre uno y otro)
+function imprimirHTML(cuerpo, copias = 1) {
+  const angosto = Number(IMP.ancho) === 58;
+  const partes = typeof cuerpo === 'function' ? Array.from({ length: copias }, (_, i) => cuerpo(i)) : Array(copias).fill(cuerpo);
   const ifr = document.createElement('iframe');
   ifr.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:0';
   document.body.appendChild(ifr);
   const doc = ifr.contentDocument;
   doc.open();
   doc.write(`<!doctype html><html><head><meta charset="utf-8"><style>
-    @page { size: 80mm auto; margin: 3mm; }
-    body { font: 12px/1.35 "Courier New", monospace; width: 72mm; margin: 0; color: #000; }
-    h1 { font-size: 15px; text-align: center; margin: 0 0 2px; } .c { text-align: center; } .r { text-align: right; }
+    @page { size: ${angosto ? 58 : 80}mm auto; margin: ${angosto ? 2 : 3}mm; }
+    body { font: ${angosto ? 11 : 12}px/1.35 "Courier New", monospace; width: ${angosto ? 50 : 72}mm; margin: 0; color: #000; }
+    h1 { font-size: ${angosto ? 13 : 15}px; text-align: center; margin: 0 0 2px; } .c { text-align: center; } .r { text-align: right; }
     hr { border: 0; border-top: 1px dashed #000; margin: 6px 0; } table { width: 100%; border-collapse: collapse; }
-    td { vertical-align: top; padding: 1px 0; } .t td { font-size: 14px; font-weight: bold; } img { display: block; margin: 0 auto 4px; width: 90px; }
-  </style></head><body>${cuerpo}</body></html>`);
+    td { vertical-align: top; padding: 1px 0; } .t td { font-size: ${angosto ? 13 : 14}px; font-weight: bold; }
+    img { display: block; margin: 0 auto 4px; width: ${angosto ? 70 : 90}px; }
+    .copia { break-before: page; page-break-before: always; } .etq { text-align: center; font-weight: bold; border: 1px solid #000; margin-bottom: 4px; }
+  </style></head><body>${partes.map((p, i) => `<div class="${i ? 'copia' : ''}">${p}</div>`).join('')}</body></html>`);
   doc.close();
-  setTimeout(() => {
+  const imprimir = () => {
     try { ifr.contentWindow.focus(); ifr.contentWindow.print(); } catch (e) { /* sin impresora */ }
     setTimeout(() => ifr.remove(), 2000);
-  }, 250);
+  };
+  // espera a que cargue el logo para que salga impreso
+  const imgs = [...doc.images].filter(im => !im.complete);
+  if (!imgs.length) setTimeout(imprimir, 150);
+  else Promise.all(imgs.map(im => new Promise(r => { im.onload = im.onerror = r; }))).then(() => setTimeout(imprimir, 50));
 }
 
-function encabezadoTicket(almacenId) {
-  const a = S.idx.alm[almacenId] || {};
-  return `<img src="icons/icon-192.png" alt=""><h1>${esc(CFG.NOMBRE)}</h1><div class="c">${esc(a.nombre || '')}${a.direccion ? '<br>' + esc(a.direccion) : ''}${a.telefono ? '<br>Tel. ' + esc(a.telefono) : ''}</div><hr>`;
-}
-
-function imprimirTicket(v) {
-  const filas = v.lineas.map(l => {
-    const p = S.idx.prod[l.producto_id] || {};
-    return `<tr><td colspan="2">${esc(p.nombre || '')}</td></tr><tr><td>${numero(l.cantidad)} x ${dinero(l.precio)}</td><td class="r">${dinero(l.cantidad * l.precio)}</td></tr>`;
+// Renglones de un doc → HTML
+function htmlDoc(ops) {
+  return ops.map(o => {
+    switch (o.k) {
+      case 'logo': return IMP.logo ? '<img src="icons/icon-192.png" alt="">' : '';
+      case 'titulo': return `<h1>${esc(o.s)}</h1>`;
+      case 'centro': return `<div class="c">${o.neg ? '<b>' : ''}${esc(o.s).replace(/\n/g, '<br>')}${o.neg ? '</b>' : ''}</div>`;
+      case 'sep': return '<hr>';
+      case 'txt': return `<div>${esc(o.s)}</div>`;
+      case 'par': return `<table><tr class="${o.grande ? 't' : ''}"><td>${o.neg ? `<b>${esc(o.a)}</b>` : esc(o.a)}</td><td class="r">${o.neg ? `<b>${esc(o.b)}</b>` : esc(o.b)}</td></tr></table>`;
+      case 'etq': return `<div class="etq">${esc(o.s)}</div>`;
+      case 'firma': return `<br><br><div class="c">______________________<br>${esc(o.s)}</div>`;
+      default: return '';
+    }
   }).join('');
+}
+
+/* --- ESC/POS --- */
+const CP850 = { 'á': 0xA0, 'é': 0x82, 'í': 0xA1, 'ó': 0xA2, 'ú': 0xA3, 'ñ': 0xA4, 'Ñ': 0xA5, 'ü': 0x81, 'Ü': 0x9A, '¡': 0xAD, '¿': 0xA8,
+  'Á': 0xB5, 'É': 0x90, 'Í': 0xD6, 'Ó': 0xE0, 'Ú': 0xE9, '·': 0xFA, '°': 0xF8 };
+const columnasTicket = () => (Number(IMP.ancho) === 58 ? 32 : 48);
+
+function bytesTexto(s) {
+  const out = [];
+  for (const ch of String(s)) {
+    const c = ch.charCodeAt(0);
+    if (c < 128) { out.push(c); continue; }
+    if (!IMP.sinAcentos && CP850[ch]) { out.push(CP850[ch]); continue; }
+    const base = ch.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+    if (base.length === 1 && base.charCodeAt(0) < 128) out.push(base.charCodeAt(0));
+    else if (ch === '—' || ch === '–') out.push(45);
+    else if (ch === '·') out.push(45);
+    else if (ch !== '¡' && ch !== '¿') out.push(63);
+  }
+  return out;
+}
+
+// Parte un texto en renglones del ancho del papel
+function partirTexto(s, cols) {
+  const res = [];
+  String(s).split('\n').forEach(linea => {
+    let actual = '';
+    linea.split(/\s+/).filter(Boolean).forEach(p => {
+      while (p.length > cols) { if (actual) { res.push(actual); actual = ''; } res.push(p.slice(0, cols)); p = p.slice(cols); }
+      if (!actual) actual = p;
+      else if ((actual + ' ' + p).length <= cols) actual += ' ' + p;
+      else { res.push(actual); actual = p; }
+    });
+    res.push(actual);
+  });
+  return res;
+}
+
+// Logo convertido a puntos blanco y negro (con tramado para que el amarillo no desaparezca)
+const cacheLogo = {};
+async function logoRaster(anchoPuntos) {
+  if (cacheLogo[anchoPuntos]) return cacheLogo[anchoPuntos];
+  const img = new Image();
+  img.src = 'icons/icon-192.png';
+  await img.decode();
+  const w = anchoPuntos, h = Math.round(img.height * w / img.width);
+  const cv = document.createElement('canvas');
+  cv.width = w; cv.height = h;
+  const cx = cv.getContext('2d');
+  cx.fillStyle = '#fff';
+  cx.fillRect(0, 0, w, h);
+  cx.drawImage(img, 0, 0, w, h);
+  const px = cx.getImageData(0, 0, w, h).data;
+  const gris = new Float32Array(w * h);
+  for (let i = 0; i < w * h; i++) gris[i] = 0.299 * px[i * 4] + 0.587 * px[i * 4 + 1] + 0.114 * px[i * 4 + 2];
+  const bpr = w / 8;
+  const datos = new Uint8Array(bpr * h);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = y * w + x;
+      const negro = gris[i] < 128;
+      const err = gris[i] - (negro ? 0 : 255);
+      if (negro) datos[y * bpr + (x >> 3)] |= 0x80 >> (x & 7);
+      if (x + 1 < w) gris[i + 1] += err * 7 / 16;
+      if (y + 1 < h) {
+        if (x > 0) gris[i + w - 1] += err * 3 / 16;
+        gris[i + w] += err * 5 / 16;
+        if (x + 1 < w) gris[i + w + 1] += err / 16;
+      }
+    }
+  }
+  const r = [0x1D, 0x76, 0x30, 0x00, bpr & 0xff, bpr >> 8, h & 0xff, h >> 8, ...datos];
+  cacheLogo[anchoPuntos] = r;
+  return r;
+}
+
+const ESC_CAJON = [0x1B, 0x70, 0x00, 0x19, 0xFA];
+
+// Convierte uno o varios docs (copias) a bytes ESC/POS, con corte de papel entre cada uno
+async function escposDocs(docs, cajon = false) {
+  const cols = columnasTicket();
+  const b = [0x1B, 0x40, 0x1B, 0x74, 0x02];
+  if (cajon) b.push(...ESC_CAJON);
+  const lin = s => b.push(...bytesTexto(s), 0x0A);
+  const centro = on => b.push(0x1B, 0x61, on ? 1 : 0);
+  const negrita = on => b.push(0x1B, 0x45, on ? 1 : 0);
+  for (const ops of docs) {
+    for (const o of ops) {
+      switch (o.k) {
+        case 'logo':
+          if (!IMP.logo) break;
+          try { const r = await logoRaster(Number(IMP.ancho) === 58 ? 160 : 200); centro(true); b.push(...r, 0x0A); centro(false); } catch (e) { /* sin logo */ }
+          break;
+        case 'titulo':
+          // letra doble de ancho y alto si cabe en un renglón; si no, solo doble de alto
+          const ancho = String(o.s).length <= cols / 2;
+          centro(true); negrita(true); b.push(0x1D, 0x21, ancho ? 0x11 : 0x01);
+          partirTexto(o.s, ancho ? cols / 2 : cols).forEach(lin);
+          b.push(0x1D, 0x21, 0x00); negrita(false); centro(false);
+          break;
+        case 'centro':
+          centro(true); if (o.neg) negrita(true);
+          partirTexto(o.s, cols).forEach(lin);
+          if (o.neg) negrita(false); centro(false);
+          break;
+        case 'sep': lin('-'.repeat(cols)); break;
+        case 'txt': partirTexto(o.s, cols).forEach(lin); break;
+        case 'par': {
+          if (o.neg) negrita(true);
+          if (o.grande) b.push(0x1D, 0x21, 0x01);
+          const a = String(o.a), d = String(o.b);
+          if (a.length + d.length + 1 <= cols) lin(a + ' '.repeat(cols - a.length - d.length) + d);
+          else { partirTexto(a, cols).forEach(lin); lin(' '.repeat(Math.max(0, cols - d.length)) + d); }
+          if (o.grande) b.push(0x1D, 0x21, 0x00);
+          if (o.neg) negrita(false);
+          break;
+        }
+        case 'etq': centro(true); b.push(0x1D, 0x42, 1); lin(` ${o.s} `); b.push(0x1D, 0x42, 0); centro(false); break;
+        case 'firma': b.push(0x0A, 0x0A, 0x0A); centro(true); lin('______________________'); lin(o.s); centro(false); break;
+      }
+    }
+    b.push(0x1B, 0x64, 0x04, 0x1D, 0x56, 0x41, 0x03);
+  }
+  return new Uint8Array(b);
+}
+
+/* --- Conexiones directas --- */
+const PRN = { usb: null, ble: null, bleCar: null };
+const SERVICIOS_BLE = [0x18f0, 0xff00, 0xffe0, 0xfee7, 0xae30, 0xae00, 0xfff0,
+  'e7810a71-73ae-499d-8c15-faa9aef0c3f2', '49535343-fe7d-4ae5-8fa9-9fafd205e455'];
+const MODOS_IMP = { sistema: 'Ventana de impresión', usb: 'USB directo', ble: 'Bluetooth directo', rawbt: 'App RawBT' };
+const modoDirecto = () => IMP.modo && IMP.modo !== 'sistema';
+
+async function puertoUSB(dev) {
+  if (!dev.opened) await dev.open();
+  if (dev.configuration === null) await dev.selectConfiguration(1);
+  for (const itf of dev.configuration.interfaces) {
+    for (const alt of itf.alternates) {
+      const ep = alt.endpoints.find(e => e.direction === 'out' && e.type === 'bulk');
+      if (ep) {
+        if (!itf.claimed) await dev.claimInterface(itf.interfaceNumber);
+        return ep.endpointNumber;
+      }
+    }
+  }
+  throw new Error('la impresora USB no tiene un canal de impresión compatible.');
+}
+
+async function enviarUSB(bytes) {
+  if (!navigator.usb) throw new Error('este navegador no permite USB directo; usa Chrome.');
+  let dev = PRN.usb;
+  if (!dev) {
+    const ds = await navigator.usb.getDevices();
+    dev = ds.find(d => IMP.usb && d.vendorId === IMP.usb.vendorId && d.productId === IMP.usb.productId) || ds[0];
+  }
+  if (!dev) throw new Error('elige la impresora USB en ⚙ Impresora.');
+  const ep = await puertoUSB(dev);
+  for (let i = 0; i < bytes.length; i += 4096) await dev.transferOut(ep, bytes.slice(i, i + 4096));
+  PRN.usb = dev;
+}
+
+async function caracteristicaBLE(dev) {
+  const srv = await dev.gatt.connect();
+  for (const s of await srv.getPrimaryServices()) {
+    for (const c of await s.getCharacteristics()) {
+      if (c.properties.writeWithoutResponse || c.properties.write) return c;
+    }
+  }
+  throw new Error('la impresora Bluetooth no tiene un canal de impresión compatible.');
+}
+
+// Debe llamarse desde un clic (el navegador muestra la lista de dispositivos)
+async function elegirBLE(soloGuardada = false) {
+  if (!navigator.bluetooth) throw new Error('Este navegador no permite Bluetooth directo. Usa Chrome en Android.');
+  const filtro = soloGuardada && IMP.ble && IMP.ble.nombre
+    ? { filters: [{ name: IMP.ble.nombre }], optionalServices: SERVICIOS_BLE }
+    : { acceptAllDevices: true, optionalServices: SERVICIOS_BLE };
+  const dev = await navigator.bluetooth.requestDevice(filtro);
+  PRN.bleCar = await caracteristicaBLE(dev);
+  PRN.ble = dev;
+  return { nombre: dev.name || 'Impresora Bluetooth' };
+}
+
+async function enviarBLE(bytes) {
+  if (!PRN.ble && navigator.bluetooth && navigator.bluetooth.getDevices && IMP.ble) {
+    const ds = await navigator.bluetooth.getDevices();
+    PRN.ble = ds.find(d => d.name === IMP.ble.nombre) || null;
+  }
+  if (!PRN.ble) throw new Error('conecta la impresora con el botón "Conectar impresora" de la caja.');
+  if (!PRN.bleCar || !PRN.ble.gatt.connected) PRN.bleCar = await caracteristicaBLE(PRN.ble);
+  const c = PRN.bleCar;
+  const sinResp = c.properties.writeWithoutResponse;
+  const tam = sinResp ? 20 : 180;
+  for (let i = 0; i < bytes.length; i += tam) {
+    const parte = bytes.slice(i, i + tam);
+    if (sinResp) await c.writeValueWithoutResponse(parte); else await c.writeValue(parte);
+  }
+}
+const impresoraBLELista = () => !!(PRN.ble && PRN.ble.gatt && PRN.ble.gatt.connected);
+
+// RawBT recibe el ticket ya armado y lo manda a la impresora que tenga configurada (Bluetooth, USB o red)
+let abrirIntent = url => { location.href = url; };
+function enviarRawBT(bytes) {
+  let bin = '';
+  for (let i = 0; i < bytes.length; i += 8192) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 8192));
+  abrirIntent(`intent:base64,${btoa(bin)}#Intent;scheme=rawbt;package=ru.a402d.rawbtprinter;end;`);
+}
+
+async function enviarDirecto(bytes) {
+  if (IMP.modo === 'usb') return enviarUSB(bytes);
+  if (IMP.modo === 'ble') return enviarBLE(bytes);
+  if (IMP.modo === 'rawbt') return enviarRawBT(bytes);
+  throw new Error('modo de impresión desconocido.');
+}
+
+// Imprime un doc: fabrica(i) devuelve los renglones de la copia i (0 = original)
+async function imprimirDoc(fabrica, copias = 1, cajon = false) {
+  copias = Math.max(1, Number(copias) || 1);
+  if (!modoDirecto()) { imprimirHTML(i => htmlDoc(fabrica(i)), copias); return; }
+  try {
+    const docs = Array.from({ length: copias }, (_, i) => fabrica(i));
+    await enviarDirecto(await escposDocs(docs, cajon && IMP.cajon));
+  } catch (e) {
+    toast(`No se pudo imprimir por ${MODOS_IMP[IMP.modo]}: ${e.message} Se abre la ventana de impresión.`, 'error');
+    imprimirHTML(i => htmlDoc(fabrica(i)), copias);
+  }
+}
+
+async function abrirCajon() {
+  if (!modoDirecto() || !IMP.cajon) return;
+  try { await enviarDirecto(new Uint8Array([0x1B, 0x40, ...ESC_CAJON])); } catch (e) { toast('No se pudo abrir el cajón: ' + e.message, 'error'); }
+}
+
+/* --- Documentos --- */
+function docEncabezado(almacenId) {
+  const a = S.idx.alm[almacenId] || {};
+  return [{ k: 'logo' }, { k: 'titulo', s: CFG.NOMBRE },
+    { k: 'centro', s: [a.nombre, a.direccion, a.telefono ? 'Tel. ' + a.telefono : ''].filter(Boolean).join('\n') }, { k: 'sep' }];
+}
+
+function docTicket(v, copia) {
   const pg = v.pagos || {};
-  const linea = (t, n) => (Number(n) > 0 ? `<tr><td>${t}</td><td class="r">${dinero(n)}</td></tr>` : '');
-  imprimirHTML(`${encabezadoTicket(v.almacen_id)}
-    <div>Ticket: ${ticketCorto(v.id)}${v.folio ? ' · ' + esc(v.folio) : ''}<br>${fechaHora(v.fecha)}<br>Atendió: ${esc(S.usuario.nombre)}<br>Cliente: ${esc(v.cliente || 'Público en general')}</div><hr>
-    <table>${filas}</table><hr>
-    <table><tr class="t"><td>TOTAL</td><td class="r">${dinero(v.total)}</td></tr>
-    ${linea('Efectivo', pg.efectivo)}${linea('Tarjeta', pg.tarjeta)}${linea('Transferencia', pg.transferencia)}${linea('A crédito', pg.credito)}
-    ${Number(pg.efectivo) > 0 ? linea('Recibido', v.recibido) + `<tr><td>Cambio</td><td class="r">${dinero(v.cambio || 0)}</td></tr>` : ''}</table>
-    ${v.cancelada ? '<hr><div class="c"><b>VENTA CANCELADA</b></div>' : ''}
-    <hr><div class="c">¡Gracias por su compra!</div>`);
+  const o = copia ? [{ k: 'etq', s: 'COPIA' }] : [];
+  o.push(...docEncabezado(v.almacen_id),
+    { k: 'txt', s: `Ticket: ${ticketCorto(v.id)}${v.folio ? ' · ' + v.folio : ''}` }, { k: 'txt', s: fechaHora(v.fecha) },
+    { k: 'txt', s: 'Atendió: ' + (v.cajero || S.usuario.nombre) }, { k: 'txt', s: 'Cliente: ' + (v.cliente || 'Público en general') }, { k: 'sep' });
+  v.lineas.forEach(l => {
+    const p = S.idx.prod[l.producto_id] || {};
+    o.push({ k: 'txt', s: p.nombre || '' }, { k: 'par', a: `${numero(l.cantidad)} x ${dinero(l.precio)}`, b: dinero(l.cantidad * l.precio) });
+  });
+  o.push({ k: 'sep' }, { k: 'par', a: 'TOTAL', b: dinero(v.total), neg: true, grande: true });
+  [['Efectivo', pg.efectivo], ['Tarjeta', pg.tarjeta], ['Transferencia', pg.transferencia], ['A crédito', pg.credito]]
+    .forEach(([t, n]) => { if (Number(n) > 0) o.push({ k: 'par', a: t, b: dinero(n) }); });
+  if (Number(pg.efectivo) > 0) o.push({ k: 'par', a: 'Recibido', b: dinero(v.recibido) }, { k: 'par', a: 'Cambio', b: dinero(v.cambio || 0) });
+  if (Number(pg.credito) > 0) o.push({ k: 'firma', s: 'Firma del cliente' });
+  if (v.cancelada) o.push({ k: 'sep' }, { k: 'centro', s: 'VENTA CANCELADA', neg: true });
+  if (IMP.pie) o.push({ k: 'sep' }, { k: 'centro', s: IMP.pie });
+  return o;
+}
+
+function imprimirTicket(v, copias = 1, cajon = false) {
+  return imprimirDoc(i => docTicket(v, i > 0), copias, cajon);
 }
 
 function imprimirCorte(c) {
-  const l = (t, n) => `<tr><td>${t}</td><td class="r">${dinero(n)}</td></tr>`;
-  imprimirHTML(`${encabezadoTicket(c.almacen_id)}
-    <div class="c"><b>CORTE DE CAJA</b></div><div>Cajero: ${esc(c.cajero || S.usuario.nombre)}<br>Apertura: ${fechaHora(c.apertura)}<br>Cierre: ${fechaHora(c.cierre)}</div><hr>
-    <table><tr><td>Ventas</td><td class="r">${c.ventas}</td></tr>${l('Total vendido', c.total_ventas)}${l('Efectivo', c.efectivo)}${l('Tarjeta', c.tarjeta)}
-    ${l('Transferencia', c.transferencia)}${l('A crédito', c.credito)}${l('Abonos en efectivo', c.abonos_efectivo)}${l('Abonos otros medios', c.abonos_otros)}</table><hr>
-    <table>${l('Fondo inicial', c.fondo)}${l('Efectivo esperado', c.esperado)}${l('Efectivo contado', c.contado)}
-    <tr class="t"><td>Diferencia</td><td class="r">${dinero(c.diferencia)}</td></tr></table>
-    ${c.notas ? `<hr><div>Notas: ${esc(c.notas)}</div>` : ''}<br><br><div class="c">______________________<br>Firma</div>`);
+  const p = (a, n, neg) => ({ k: 'par', a, b: dinero(n), neg, grande: neg });
+  return imprimirDoc(() => [...docEncabezado(c.almacen_id), { k: 'centro', s: 'CORTE DE CAJA', neg: true },
+    { k: 'txt', s: 'Cajero: ' + (c.cajero || S.usuario.nombre) }, { k: 'txt', s: 'Apertura: ' + fechaHora(c.apertura) }, { k: 'txt', s: 'Cierre: ' + fechaHora(c.cierre) },
+    { k: 'sep' }, { k: 'par', a: 'Ventas', b: String(c.ventas) }, p('Total vendido', c.total_ventas), p('Efectivo', c.efectivo), p('Tarjeta', c.tarjeta),
+    p('Transferencia', c.transferencia), p('A crédito', c.credito), p('Abonos en efectivo', c.abonos_efectivo), p('Abonos otros medios', c.abonos_otros),
+    { k: 'sep' }, p('Fondo inicial', c.fondo), p('Efectivo esperado', c.esperado), p('Efectivo contado', c.contado), p('Diferencia', c.diferencia, true),
+    ...(c.notas ? [{ k: 'sep' }, { k: 'txt', s: 'Notas: ' + c.notas }] : []), { k: 'firma', s: 'Firma' }]);
 }
 
-function imprimirAbono(a) {
-  imprimirHTML(`${encabezadoTicket(a.almacen_id)}<div class="c"><b>COMPROBANTE DE ABONO</b></div>
-    <div>${fechaHora(a.fecha)}<br>Cliente: ${esc(a.cliente)}<br>Recibió: ${esc(S.usuario.nombre)}</div><hr>
-    <table><tr class="t"><td>Abono</td><td class="r">${dinero(a.monto)}</td></tr><tr><td>Forma de pago</td><td class="r">${METODOS_CAJA[a.metodo] || a.metodo}</td></tr>
-    <tr><td>Saldo restante</td><td class="r">${dinero(a.saldo_restante)}</td></tr></table><hr><div class="c">¡Gracias!</div>`);
+function imprimirAbono(a, cajon = false) {
+  return imprimirDoc(() => [...docEncabezado(a.almacen_id), { k: 'centro', s: 'COMPROBANTE DE ABONO', neg: true },
+    { k: 'txt', s: fechaHora(a.fecha) }, { k: 'txt', s: 'Cliente: ' + a.cliente }, { k: 'txt', s: 'Recibió: ' + S.usuario.nombre }, { k: 'sep' },
+    { k: 'par', a: 'Abono', b: dinero(a.monto), neg: true, grande: true }, { k: 'par', a: 'Forma de pago', b: METODOS_CAJA[a.metodo] || a.metodo },
+    { k: 'par', a: 'Saldo restante', b: dinero(a.saldo_restante) }, { k: 'sep' }, { k: 'centro', s: '¡Gracias!' }], 1, cajon);
+}
+
+// Envía el ticket por correo (la venta debe estar ya en el servidor)
+async function enviarCorreoTicket(v, email) {
+  try {
+    await api('enviarTicket', { venta_id: v.id, email, pie: IMP.pie });
+    v.correoEnviado = email;
+    delete v.correo;
+    if (CJ.estado && CJ.estado.ventas.includes(v)) guardarCaja();
+    toast(`Ticket enviado a ${email}.`, 'ok');
+    return true;
+  } catch (e) {
+    toast(`No se pudo enviar el ticket a ${email}: ${e.message}`, 'error');
+    return false;
+  }
+}
+
+// Opciones de un ticket: imprimir, imprimir doble o enviar por correo
+function dlgTicket(v) {
+  const cli = clientePorId(v.cliente_id);
+  const d = abrirModal(`Ticket ${v.folio || ticketCorto(v.id)}`, `
+    <form id="ftk" class="form" autocomplete="off">
+      <div class="cobro-total"><span>${fechaHora(v.fecha)}</span><b>${dinero(v.total)}</b><small>${esc(v.cliente || (cli ? cli.nombre : 'Público en general'))}</small></div>
+      <div class="acciones grande"><button type="button" class="btn" data-copias="1">Imprimir ticket</button><button type="button" class="btn sec" data-copias="2">Imprimir doble</button></div>
+      <label>Enviar por correo<input name="email" type="email" placeholder="correo@ejemplo.com" value="${esc(v.correoEnviado || (cli && cli.email) || '')}"></label>
+      ${v.correoEnviado ? `<p class="nota">Ya se envió a ${esc(v.correoEnviado)}.</p>` : v.correo ? `<p class="nota">Pendiente de enviar a ${esc(v.correo)}.</p>` : ''}
+      <p class="msg" id="ftk-msg"></p>
+      <div class="pie"><button type="button" class="btn sec" data-cerrar>Cerrar</button><button class="btn" type="submit">Enviar por correo</button></div>
+    </form>`);
+  const f = $('#ftk', d);
+  $$('[data-copias]', d).forEach(b => { b.onclick = () => imprimirTicket(v, Number(b.dataset.copias)); });
+  f.onsubmit = async ev => {
+    ev.preventDefault();
+    const email = f.email.value.trim().toLowerCase();
+    const msg = $('#ftk-msg', d);
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { msg.textContent = 'Escribe un correo válido.'; return; }
+    if (v.sync === 'error') { msg.textContent = 'Esta venta fue rechazada por el servidor; no se puede enviar.'; return; }
+    if (v.sync && v.sync !== 'enviada') {
+      v.correo = email;
+      guardarCaja();
+      cerrarModal();
+      toast(`El ticket se enviará a ${email} en cuanto la venta llegue al servidor.`, '');
+      if (navigator.onLine) sincronizar();
+      return;
+    }
+    if (!navigator.onLine) { msg.textContent = 'Necesitas conexión para enviar el correo.'; return; }
+    const ok = await conCarga('Enviando ticket…', () => enviarCorreoTicket(v, email));
+    if (ok) cerrarModal();
+  };
+}
+
+// Configuración de la impresora de tickets de este equipo
+function dlgImpresora(alCerrar) {
+  const sel = { usb: IMP.usb, ble: IMP.ble };
+  const d = abrirModal('Impresora de tickets', `
+    <form id="fimp" class="form">
+      <p class="nota">Esta configuración se guarda en este equipo. Cada caja puede tener la suya.</p>
+      <label>Cómo se conecta la impresora<select name="modo">
+        <option value="sistema">Ventana de impresión (computadora o cualquier impresora)</option>
+        <option value="usb">USB directo (tablet con hub o cable OTG)</option>
+        <option value="ble">Bluetooth directo (impresoras Bluetooth BLE)</option>
+        <option value="rawbt">App RawBT (Bluetooth clásico, USB o red)</option></select></label>
+      <div class="imp-modo" data-m="usb">
+        <p>Conecta la impresora al hub o cable de la tablet, enciéndela y elígela de la lista.</p>
+        <div class="acciones"><button type="button" class="btn sec" id="imp-usb">Elegir impresora USB</button><span class="imp-dev" id="imp-usb-txt"></span></div>
+      </div>
+      <div class="imp-modo" data-m="ble">
+        <p>Enciende la impresora y búscala. Si no aparece en la lista, tu impresora usa Bluetooth clásico: elige "App RawBT".</p>
+        <div class="acciones"><button type="button" class="btn sec" id="imp-ble">Buscar impresora Bluetooth</button><span class="imp-dev" id="imp-ble-txt"></span></div>
+        <p class="nota">Cada vez que se abre la app hay que tocar "Conectar impresora" en la caja; Android pide confirmarlo.</p>
+      </div>
+      <div class="imp-modo" data-m="rawbt">
+        <ol class="pasos-imp">
+          <li>Instala <a href="https://play.google.com/store/apps/details?id=ru.a402d.rawbtprinter" target="_blank" rel="noopener">RawBT</a> desde Play Store.</li>
+          <li>En RawBT elige la conexión: Bluetooth, USB o red (escribe la IP de la impresora, puerto 9100). Imprime su página de prueba.</li>
+          <li>Aquí presiona "Imprimir prueba". La primera vez Android pregunta con qué app abrir: elige RawBT y "Siempre".</li>
+        </ol>
+      </div>
+      <div class="fila2">
+        <label>Ancho del papel<select name="ancho"><option value="80">80 mm</option><option value="58">58 mm</option></select></label>
+        <label>Al cobrar<select name="copias"><option value="0">No imprimir</option><option value="1">Imprimir ticket</option><option value="2">Imprimir ticket doble</option></select></label>
+      </div>
+      <label class="chk"><input type="checkbox" name="logo"> Imprimir el logo</label>
+      <label>Mensaje al pie del ticket<input name="pie" maxlength="120"></label>
+      <div class="imp-directo">
+        <label class="chk"><input type="checkbox" name="cajon"> Abrir el cajón de dinero al cobrar en efectivo (cajón conectado a la impresora)</label>
+        <label class="chk"><input type="checkbox" name="sinAcentos"> Quitar acentos (si la impresora imprime símbolos raros en lugar de á, é, ñ)</label>
+      </div>
+      <div class="acciones"><button type="button" class="btn sec" id="imp-prueba">Imprimir prueba</button><button type="button" class="btn sec imp-directo" id="imp-cajon">Probar cajón</button></div>
+      <details class="ayuda imp-modo" data-m="sistema"><summary>¿Cómo imprimir directo desde una computadora, sin la ventana de impresión?</summary>
+        <ol>
+          <li>Conecta la impresora de tickets e instala su controlador.</li>
+          <li>En Windows, ve a <b>Configuración &gt; Bluetooth y dispositivos &gt; Impresoras y escáneres</b>, elige la impresora de tickets y marca <b>Establecer como predeterminada</b>. Apaga "Permitir que Windows administre la impresora predeterminada".</li>
+          <li>En el escritorio, clic derecho &gt; <b>Nuevo &gt; Acceso directo</b>, y pega:<br>
+            <code id="imp-cmd">"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" --kiosk-printing --app=${esc(location.href.split('#')[0])}</code>
+            <button type="button" class="btn mini sec" id="imp-copiar">Copiar</button></li>
+          <li>Llámalo "Caja" y ábrelo desde ahí. Chrome debe estar cerrado por completo antes de abrirlo (revisa que no quede en la bandeja junto al reloj).</li>
+        </ol>
+        <p class="nota">Así los tickets salen solos en la impresora predeterminada. Si usas Edge, cambia la ruta de Chrome por esta:</p>
+        <code>"C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe"</code>
+      </details>
+      <p class="msg" id="fimp-msg"></p>
+      <div class="pie"><button type="button" class="btn sec" data-cerrar>Cancelar</button><button class="btn" type="submit">Guardar</button></div>
+    </form>`);
+  const f = $('#fimp', d), msg = $('#fimp-msg', d);
+  f.modo.value = IMP.modo || 'sistema';
+  f.ancho.value = String(IMP.ancho);
+  f.copias.value = IMP.auto ? String(IMP.copias) : '0';
+  f.logo.checked = IMP.logo;
+  f.pie.value = IMP.pie;
+  f.cajon.checked = !!IMP.cajon;
+  f.sinAcentos.checked = !!IMP.sinAcentos;
+  const pintar = () => {
+    $$('.imp-modo', d).forEach(x => { x.hidden = x.dataset.m !== f.modo.value; });
+    $$('.imp-directo', d).forEach(x => { x.hidden = f.modo.value === 'sistema'; });
+    $('#imp-usb-txt', d).textContent = sel.usb ? 'Elegida: ' + sel.usb.nombre : 'Ninguna elegida';
+    $('#imp-ble-txt', d).textContent = sel.ble ? (impresoraBLELista() ? 'Conectada: ' : 'Elegida: ') + sel.ble.nombre : 'Ninguna elegida';
+  };
+  pintar();
+  f.modo.onchange = () => { msg.textContent = ''; pintar(); };
+  const leer = () => {
+    const c = Number(f.copias.value);
+    return { modo: f.modo.value, ancho: Number(f.ancho.value), auto: c > 0, copias: c > 0 ? c : IMP.copias, logo: f.logo.checked, pie: f.pie.value.trim(),
+      cajon: f.cajon.checked, sinAcentos: f.sinAcentos.checked, usb: sel.usb, ble: sel.ble };
+  };
+  $('#imp-usb', d).onclick = async () => {
+    msg.textContent = '';
+    if (!navigator.usb) { msg.textContent = 'Este navegador no permite USB directo. Usa Chrome en la tablet o computadora.'; return; }
+    try {
+      const dev = await navigator.usb.requestDevice({ filters: [] });
+      sel.usb = { vendorId: dev.vendorId, productId: dev.productId, nombre: dev.productName || dev.manufacturerName || 'Impresora USB' };
+      PRN.usb = dev;
+      pintar();
+    } catch (e) { if (e.name !== 'NotFoundError') msg.textContent = 'No se pudo usar la impresora USB: ' + e.message; }
+  };
+  $('#imp-ble', d).onclick = async () => {
+    msg.textContent = '';
+    try { sel.ble = await elegirBLE(); pintar(); } catch (e) { if (e.name !== 'NotFoundError') msg.textContent = 'No se pudo conectar: ' + e.message; }
+  };
+  const conPrueba = async fn => {
+    const antes = Object.assign({}, IMP);
+    Object.assign(IMP, leer());
+    try { await fn(); } finally { Object.assign(IMP, antes); }
+  };
+  $('#imp-prueba', d).onclick = () => conPrueba(() => {
+    const p = S.catalogo.productos.find(x => esActivo(x.activo)) || { id: '', nombre: 'Producto de prueba' };
+    if (!p.id) S.idx.prod[''] = p;
+    return imprimirTicket({ id: 'PRUEBA', folio: 'PRUEBA', fecha: new Date().toISOString(), almacen_id: S.usuario.almacen_id, cliente: 'Público en general',
+      lineas: [{ producto_id: p.id, cantidad: 2, precio: 10 }], total: 20, pagos: { efectivo: 20 }, recibido: 50, cambio: 30 }, Math.max(1, Number(f.copias.value)));
+  });
+  $('#imp-cajon', d).onclick = () => conPrueba(() => { IMP.cajon = true; return abrirCajon(); });
+  $('#imp-copiar', d).onclick = async () => {
+    try { await navigator.clipboard.writeText($('#imp-cmd', d).textContent); toast('Copiado.', 'ok'); } catch (e) { toast('Selecciona el texto y cópialo con Ctrl+C.', ''); }
+  };
+  f.onsubmit = async ev => {
+    ev.preventDefault();
+    const n = leer();
+    if (n.modo === 'usb' && !n.usb) { msg.textContent = 'Elige la impresora USB.'; return; }
+    if (n.modo === 'ble' && !n.ble) { msg.textContent = 'Busca y elige la impresora Bluetooth.'; return; }
+    Object.assign(IMP, n);
+    await DB.set('impresora', Object.assign({}, IMP));
+    cerrarModal();
+    toast('Impresora configurada en este equipo.', 'ok');
+    if (typeof alCerrar === 'function') alCerrar();
+  };
 }
 
 /* ---------- Ventas del turno, abonos y corte ---------- */
@@ -2792,14 +3343,14 @@ function dlgVentasTurno(alCerrar) {
           const est = v.cancelada ? chipEstado('CANCELADA') : v.sync === 'error' ? '<span class="est est-ATRASADA">Error</span>' : v.sync === 'enviada' ? '<span class="est est-RECIBIDA">Enviada</span>' : '<span class="est est-BORRADOR">Por enviar</span>';
           return `<tr><td><b>${ticketCorto(v.id)}</b>${v.folio ? `<small>${esc(v.folio)}</small>` : ''}</td><td>${new Date(v.fecha).toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' })}</td>
             <td>${esc(v.cliente)}</td><td class="num">${dinero(v.total)}</td><td>${formas}</td><td>${est}${v.error ? `<small class="txt-error">${esc(v.error)}</small>` : ''}${v.aviso ? `<small>${esc(v.aviso)}</small>` : ''}</td>
-            <td class="acciones"><button type="button" class="btn mini sec" data-reimp="${esc(v.id)}">Reimprimir</button>
+            <td class="acciones"><button type="button" class="btn mini sec" data-reimp="${esc(v.id)}">Ticket</button>
             ${esAdminCaja() && !v.cancelada ? `<button type="button" class="btn mini peligro" data-canc="${esc(v.id)}">Cancelar</button>` : ''}</td></tr>`;
         }).join('')}</tbody></table></div>` : '<p class="vacio">Aún no hay ventas en este turno.</p>'}
     </div>`, true);
   d.onclick = async e => {
     const r = e.target.closest('[data-reimp]');
     const c = e.target.closest('[data-canc]');
-    if (r) imprimirTicket(E.ventas.find(v => v.id === r.dataset.reimp));
+    if (r) dlgTicket(E.ventas.find(v => v.id === r.dataset.reimp));
     if (c) {
       const v = E.ventas.find(x => x.id === c.dataset.canc);
       if (v.sync !== 'enviada') { toast('Primero debe enviarse al servidor (necesita conexión).', 'error'); return; }
@@ -2829,7 +3380,7 @@ function dlgAbono(clienteId, alTerminar) {
       <div class="fila3"><label>Monto<input name="monto" type="number" step="0.01" min="0.01" required inputmode="decimal"></label>
         <label>Forma de pago<select name="metodo">${Object.entries(METODOS_CAJA).map(([k, t]) => `<option value="${k}">${t}</option>`).join('')}</select></label>
         <label>Referencia<input name="referencia"></label></div>
-      <label class="chk"><input type="checkbox" name="imprimir" ${CJ.imprimir ? 'checked' : ''}> Imprimir comprobante</label>
+      <label class="chk"><input type="checkbox" name="imprimir" ${IMP.auto ? 'checked' : ''}> Imprimir comprobante</label>
       <p class="msg" id="fab-msg"></p>
       <div class="pie"><button type="button" class="btn sec" data-cerrar>Cancelar</button><button class="btn" type="submit">Registrar abono</button></div>
     </form>`);
@@ -2852,7 +3403,8 @@ function dlgAbono(clienteId, alTerminar) {
     await encolarCaja(op);
     cerrarModal();
     toast(`Abono registrado. Saldo de ${cli.nombre}: ${dinero(cli.saldo)}`, 'ok');
-    if (f.imprimir.checked) imprimirAbono(local);
+    if (f.imprimir.checked) imprimirAbono(local, local.metodo === 'EFECTIVO');
+    else if (local.metodo === 'EFECTIVO') abrirCajon();
     if (alTerminar) alTerminar();
   };
 }
@@ -2884,7 +3436,7 @@ function dlgCerrarCaja(alTerminar) {
       <label>Efectivo contado<input name="contado" type="number" step="0.01" min="0" required inputmode="decimal"></label>
       <p id="fc-dif" class="cobro-res"></p>
       <label>Notas<input name="notas" placeholder="Retiros, faltantes, observaciones"></label>
-      <label class="chk"><input type="checkbox" name="imprimir" ${CJ.imprimir ? 'checked' : ''}> Imprimir corte</label>
+      <label class="chk"><input type="checkbox" name="imprimir" ${IMP.auto ? 'checked' : ''}> Imprimir corte</label>
       ${misPendientes().filter(o => o.clase && o.estado === 'pendiente').length ? '<p class="aviso-offline">Hay operaciones por enviar. El corte se enviará después de ellas, en orden.</p>' : ''}
       <div class="pie"><button type="button" class="btn sec" data-cerrar>Regresar</button><button class="btn" type="submit">Cerrar caja</button></div>
     </form>`);
@@ -3023,8 +3575,8 @@ function dlgVentaDetalle(v, alCambiar) {
         <td class="num">${dinero(l.importe)}</td><td class="num">${dinero(Number(l.costo) * Number(l.cantidad))}</td></tr>`).join('')}</tbody></table></div>
     <p>Pagos: ${[['efectivo', 'Efectivo'], ['tarjeta', 'Tarjeta'], ['transferencia', 'Transferencia'], ['credito', 'Crédito']].filter(([k]) => Number(v[k]) > 0).map(([k, t]) => `${t} ${dinero(v[k])}`).join(' · ')}</p>
     ${v.notas ? `<p class="nota">${esc(v.notas)}</p>` : ''}${v.cancelo ? `<p class="txt-error">Cancelada: ${esc(v.cancelo)}</p>` : ''}
-    <div class="acciones"><button type="button" class="btn sec" id="vd-imp">Reimprimir ticket</button>${v.cancelada ? '' : '<button type="button" class="btn peligro" id="vd-canc">Cancelar venta</button>'}</div></div>`, true);
-  $('#vd-imp', d).onclick = () => imprimirTicket({ id: v.id, folio: v.folio, fecha: v.fecha, almacen_id: v.almacen_id, cliente: clienteNombre(v.cliente_id),
+    <div class="acciones"><button type="button" class="btn sec" id="vd-imp">Imprimir o enviar ticket</button>${v.cancelada ? '' : '<button type="button" class="btn peligro" id="vd-canc">Cancelar venta</button>'}</div></div>`, true);
+  $('#vd-imp', d).onclick = () => dlgTicket({ id: v.id, folio: v.folio, fecha: v.fecha, almacen_id: v.almacen_id, cliente: clienteNombre(v.cliente_id), cliente_id: v.cliente_id, cajero: v.cajero,
     lineas: v.lineas, total: v.total, pagos: { efectivo: v.efectivo, tarjeta: v.tarjeta, transferencia: v.transferencia, credito: v.credito },
     recibido: v.recibido, cambio: v.cambio, cancelada: v.cancelada });
   const cb = $('#vd-canc', d);
@@ -4020,6 +4572,7 @@ function vCuenta(el) {
       <div class="acciones"><button type="button" class="btn" id="b-sync">Sincronizar ahora</button><button type="button" class="btn sec" id="b-inst" ${promptInstalar ? '' : 'hidden'}>Instalar en este equipo</button></div>
     </div>
     ${esGeneral() ? `<div class="panel"><h3>Empresa</h3><p class="nota">Nombre, RFC, dirección y logo que aparecen en las órdenes de compra.</p><button type="button" class="btn sec" id="b-empresa">Datos de la empresa</button></div>` : ''}
+    ${esAdminCaja() || rol() === 'CAJERO' ? `<div class="panel"><h3>Impresora de tickets</h3><p class="nota">Ancho del papel, ticket doble, logo y cómo imprimir directo en este equipo.</p><button type="button" class="btn sec" id="b-imp">Configurar impresora</button></div>` : ''}
     <div class="panel"><h3>Contraseña</h3><button type="button" class="btn sec" id="b-pass">Cambiar contraseña</button></div>
     <div class="panel"><button type="button" class="btn peligro" id="b-salir">Cerrar sesión</button></div>
     <p class="nota">Versión ${VERSION_APP}</p>`;
@@ -4032,6 +4585,8 @@ function vCuenta(el) {
   }
   $('#b-sync', el).onclick = () => sincronizar(true);
   $('#b-pass', el).onclick = () => dlgCambiarPassword(false);
+  const bimp = $('#b-imp', el);
+  if (bimp) bimp.onclick = dlgImpresora;
   if (esGeneral()) $('#b-empresa', el).onclick = dlgEmpresa;
   $('#b-salir', el).onclick = cerrarSesion;
   $('#b-inst', el).onclick = async () => {
@@ -4090,6 +4645,7 @@ async function iniciar() {
     return;
   }
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
+  await cargarImpresora().catch(() => {});
 
   $('#form-login').addEventListener('submit', onLogin);
   $('#menu').addEventListener('click', e => { const b = e.target.closest('[data-v]'); if (b) irA(b.dataset.v); });
@@ -4115,6 +4671,7 @@ async function iniciar() {
   const ses = await DB.get('sesion');
   if (ses && ses.usuario) {
     await cargarSesion(ses);
+    S.vista = rol() === 'CAJERO' ? 'caja' : 'inicio';
     mostrarApp();
     if (navigator.onLine) sincronizar();
   } else {
