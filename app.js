@@ -4,7 +4,8 @@
  * Servidor: Google Apps Script (API) + Google Sheets (base de datos). */
 
 const CFG = Object.assign({ NOMBRE: 'Control de Inventario', SYNC_MINUTOS: 15, API_URL: '' }, window.APP_CONFIG || {});
-const VERSION_APP = '5.2.0';
+CFG.NOMBRE_ORIGINAL = CFG.NOMBRE;
+const VERSION_APP = '5.3.0';
 
 const ROL_TXT = {
   ADMIN_GENERAL: 'Administrador general',
@@ -433,6 +434,7 @@ async function sincronizar(manual = false) {
       await DB.set('precios', S.precios);
     }
     S.usuario = d.usuario;
+    revisarApariencia(d.apariencia_v);
     const ses = await DB.get('sesion');
     if (ses) { ses.usuario = d.usuario; ses.offline = false; await DB.set('sesion', ses); }
     S.ultimaSync = Date.now();
@@ -743,6 +745,14 @@ function dlgProducto(p, codigoBarras = '') {
         <label>Código de barras<input name="codigo_barras" value="${val(p.codigo_barras)}" inputmode="numeric" ${ro}></label>
       </div>
       <label>Nombre<input name="nombre" required value="${val(p.nombre)}" ${ro}></label>
+      <div class="prod-media">
+        <div class="prod-foto" id="fp-foto">${p.imagen ? `<img data-img="${esc(p.imagen)}" alt="">` : '<span>Sin imagen</span>'}</div>
+        <div class="prod-media-der">
+          <label>Descripción <small>(se ve en la caja)</small><textarea name="descripcion" rows="3" maxlength="600" ${ro}>${val(p.descripcion)}</textarea></label>
+          ${puede ? `<div class="acciones"><label class="btn mini sec">${p.imagen ? 'Cambiar imagen' : 'Agregar imagen'}<input type="file" accept="image/*" id="fp-img" hidden></label>
+            <button type="button" class="btn mini sec" id="fp-img-quitar" ${p.imagen ? '' : 'hidden'}>Quitar imagen</button></div>` : ''}
+        </div>
+      </div>
       <div class="fila2">
         <label>Categoría<select name="categoria_id" ${ro}><option value="">Sin categoría</option>${cats.map(c => `<option value="${esc(c.id)}" ${c.id === p.categoria_id ? 'selected' : ''}>${esc(c.nombre)}</option>`).join('')}</select></label>
         <label>Unidad<input name="unidad" list="unidades" value="${val(p.unidad || 'PZA')}" ${ro}></label>
@@ -763,6 +773,20 @@ function dlgProducto(p, codigoBarras = '') {
       ${puede ? `<div class="pie">${!nuevo && esGeneral() ? '<button type="button" class="btn peligro izq" id="fp-del">Eliminar</button>' : ''}<button type="button" class="btn sec" data-cerrar>Cancelar</button><button class="btn" type="submit">Guardar</button></div>` : ''}
     </form>`);
   const f = $('#fp', d);
+  cargarImgs($('#fp-foto', d));
+  let imagenNueva = null;   // data URL elegido, '' = quitar, null = sin cambio
+  const finp = $('#fp-img', d);
+  if (finp) finp.onchange = async e => {
+    const a = e.target.files[0];
+    if (!a) return;
+    try {
+      imagenNueva = await reducirImagen(a, 500, { limite: 300000 });
+      $('#fp-foto', d).innerHTML = `<img src="${imagenNueva}" alt="">`;
+      $('#fp-img-quitar', d).hidden = false;
+    } catch (er) { $('#fp-msg', d).textContent = er.message; }
+  };
+  const fq = $('#fp-img-quitar', d);
+  if (fq) fq.onclick = () => { imagenNueva = ''; $('#fp-foto', d).innerHTML = '<span>Sin imagen</span>'; fq.hidden = true; };
   const bdel = $('#fp-del', d);
   if (bdel) bdel.onclick = () => dlgEliminarProductos([p.id], () => { if (F.psel) F.psel.delete(p.id); S.refrescar && S.refrescar(); });
   const margen = () => {
@@ -791,12 +815,19 @@ function dlgProducto(p, codigoBarras = '') {
       precio_menudeo: f.precio_menudeo.value,
       precio_mayoreo: f.precio_mayoreo.value,
       stock_minimo: f.stock_minimo.value,
+      descripcion: f.descripcion.value.trim(),
       activo: f.activo.checked
     };
     btn.disabled = true;
     msg.textContent = 'Guardando…';
     try {
-      const r = await api('guardarProducto', { producto });
+      let r = await api('guardarProducto', { producto });
+      if (imagenNueva) {
+        msg.textContent = 'Subiendo imagen…';
+        r = await api('subirImagenProducto', { producto_id: r.id, datos: imagenNueva });
+        IMGS.mem[r.imagen] = imagenNueva;
+        DB.set('img:' + r.imagen, imagenNueva);
+      } else if (imagenNueva === '' && r.imagen) r = await api('quitarImagenProducto', { producto_id: r.id });
       upsert(S.catalogo.productos, r);
       await DB.set('catalogo', S.catalogo);
       indexar();
@@ -875,7 +906,8 @@ const COLS_IMPORT = [
   { clave: 'precio_menudeo', titulo: 'Precio menudeo', ancho: 15, num: true, alias: ['precio menudeo', 'menudeo', 'precio', 'precio venta', 'precio de venta', 'precio publico'] },
   { clave: 'precio_mayoreo', titulo: 'Precio mayoreo', ancho: 15, num: true, alias: ['precio mayoreo', 'mayoreo'] },
   { clave: 'stock_minimo', titulo: 'Stock mínimo', ancho: 13, num: true, alias: ['stock minimo', 'minimo', 'existencia minima'] },
-  { clave: 'existencia', titulo: 'Existencia', ancho: 12, num: true, alias: ['existencia', 'cantidad', 'stock', 'inventario', 'existencias'] }
+  { clave: 'existencia', titulo: 'Existencia', ancho: 12, num: true, alias: ['existencia', 'cantidad', 'stock', 'inventario', 'existencias'] },
+  { clave: 'descripcion', titulo: 'Detalle para la caja', ancho: 40, alias: ['detalle para la caja', 'detalle', 'descripcion larga', 'detalle del producto'] }
 ];
 const INSTRUCCIONES_IMPORT = [
   ['Cómo llenar la hoja "Productos"'],
@@ -888,13 +920,14 @@ const INSTRUCCIONES_IMPORT = [
   ['• Unidad: PZA, KG, LT, CAJA, PAQ, etc. Si la dejas vacía queda PZA.'],
   ['• Costo y precios: solo números, sin signo de pesos. Ej. 32.50'],
   ['• Existencia: lo que hay ahora en el almacén. Al importar eliges el almacén y si se SUMA o se REEMPLAZA.'],
+  ['• Detalle para la caja: texto opcional que ve el cajero al registrar el producto (presentación, sabor, uso...).'],
   ['• No cambies los títulos de la primera fila ni el nombre de la hoja.'],
   ['• Puedes guardar como .xlsx o .csv.'],
   [''],
   ['Ejemplo de filas:'],
-  ['Código interno', 'Código de barras', 'Nombre *', 'Categoría', 'Unidad', 'Costo', 'Precio menudeo', 'Precio mayoreo', 'Stock mínimo', 'Existencia'],
-  ['', '7501055300013', 'Arroz Morelos 1 kg', 'Abarrotes', 'PZA', 22, 32, 28, 30, 120],
-  ['A-102', '', 'Queso fresco', 'Lácteos', 'KG', 85, 120, 110, 5, 12.5]
+  ['Código interno', 'Código de barras', 'Nombre *', 'Categoría', 'Unidad', 'Costo', 'Precio menudeo', 'Precio mayoreo', 'Stock mínimo', 'Existencia', 'Detalle para la caja'],
+  ['', '7501055300013', 'Arroz Morelos 1 kg', 'Abarrotes', 'PZA', 22, 32, 28, 30, 120, 'Grano largo, bolsa de 1 kg'],
+  ['A-102', '', 'Queso fresco', 'Lácteos', 'KG', 85, 120, 110, 5, 12.5, '']
 ];
 
 function descargarPlantilla(conCatalogo) {
@@ -902,12 +935,12 @@ function descargarPlantilla(conCatalogo) {
   if (conCatalogo) {
     S.catalogo.productos.filter(p => esActivo(p.activo)).sort(porNombre).forEach(p => {
       filas.push([p.codigo || '', p.codigo_barras || '', p.nombre, (S.idx.cat[p.categoria_id] || {}).nombre || '', p.unidad || '',
-        veCostos() ? Number(p.costo) || 0 : '', Number(p.precio_menudeo) || 0, Number(p.precio_mayoreo) || 0, Number(p.stock_minimo) || 0, '']);
+        veCostos() ? Number(p.costo) || 0 : '', Number(p.precio_menudeo) || 0, Number(p.precio_mayoreo) || 0, Number(p.stock_minimo) || 0, '', p.descripcion || '']);
     });
   }
   const blob = Excel.crearXlsx([
     { nombre: 'Productos', filas, encabezado: true, anchos: COLS_IMPORT.map(c => c.ancho), columnasTexto: [0, 1] },
-    { nombre: 'Instrucciones', filas: INSTRUCCIONES_IMPORT, anchos: [16, 18, 36, 14, 9, 9, 15, 15, 13, 12], columnasTexto: [1] }
+    { nombre: 'Instrucciones', filas: INSTRUCCIONES_IMPORT, anchos: [16, 18, 36, 14, 9, 9, 15, 15, 13, 12, 30], columnasTexto: [1] }
   ]);
   Excel.descargar(blob, conCatalogo ? `catalogo-productos-${new Date().toISOString().slice(0, 10)}.xlsx` : 'plantilla-productos.xlsx');
 }
@@ -2422,7 +2455,24 @@ function exportarMes() {
 
 /* ---- Punto de venta (fase 4) ---- */
 const METODOS_CAJA = { EFECTIVO: 'Efectivo', TARJETA: 'Tarjeta', TRANSFERENCIA: 'Transferencia' };
-const CJ = { estado: null, ticket: { cliente_id: '', lineas: [] }, cat: '', q: '' };
+const CJ = { estado: null, cuentas: null, activa: '', vista: 'imagenes', cat: '', q: '' };
+// Varias cuentas abiertas a la vez: CJ.ticket es siempre la cuenta activa
+Object.defineProperty(CJ, 'ticket', { get() { return (CJ.cuentas || []).find(c => c.id === CJ.activa) || { cliente_id: '', lineas: [] }; } });
+const cuentaVacia = c => !c.lineas.length && !c.cliente_id && !c.nombre;
+function nuevaCuenta() {
+  const n = (CJ.cuentas || []).reduce((m, c) => Math.max(m, c.n || 0), 0) + 1;
+  const c = { id: uuid(), n, nombre: '', cliente_id: '', lineas: [], ultimo: '' };
+  CJ.cuentas.push(c);
+  CJ.activa = c.id;
+  return c;
+}
+const guardarCuentas = () => DB.set('caja:cuentas:' + S.usuario.usuario, { lista: CJ.cuentas, activa: CJ.activa });
+function nombreCuenta(c) {
+  if (c.nombre) return c.nombre;
+  const cli = clientePorId(c.cliente_id);
+  return cli ? cli.nombre : 'Cuenta ' + c.n;
+}
+const totalCuenta = c => Math.round(c.lineas.reduce((s, l) => s + Number(l.cantidad) * Number(l.precio), 0) * 100) / 100;
 // Impresora de tickets: se configura por equipo (Mi cuenta o Caja > Impresora)
 const IMP = { modo: 'sistema', ancho: 80, copias: 1, auto: true, logo: true, pie: '¡Gracias por su compra!', cajon: false, sinAcentos: false, usb: null, ble: null };
 async function cargarImpresora() {
@@ -2446,10 +2496,16 @@ function creditoDisponible(cli) {
   if (!cli || !cli.credito) return 0;
   return Math.max(0, Math.round((Number(cli.limite_credito) - Number(cli.saldo || 0)) * 100) / 100);
 }
+const iniciales = t => String(t || '').split(/\s+/).filter(Boolean).slice(0, 2).map(x => x[0]).join('').toUpperCase();
 const ticketCorto = id => String(id).replace(/-/g, '').slice(0, 8).toUpperCase();
 
 async function cargarCaja() {
   CJ.estado = (await DB.get('caja:' + S.usuario.usuario)) || { corte: null, ventas: [], abonos: [], ultimoCorte: null };
+  const g = await DB.get('caja:cuentas:' + S.usuario.usuario);
+  CJ.cuentas = g && Array.isArray(g.lista) && g.lista.length ? g.lista : [];
+  if (!CJ.cuentas.length) nuevaCuenta();
+  else CJ.activa = CJ.cuentas.some(c => c.id === g.activa) ? g.activa : CJ.cuentas[0].id;
+  CJ.vista = (await DB.get('caja:vista')) || 'imagenes';
 }
 const guardarCaja = () => DB.set('caja:' + S.usuario.usuario, CJ.estado);
 
@@ -2506,19 +2562,24 @@ function vCaja(el) {
         ${modoDirecto() && IMP.cajon ? '<button type="button" class="btn sec" id="cj-cajon">Abrir cajón</button>' : ''}
         <button type="button" class="btn sec icono-txt" id="cj-imp" title="Configurar impresora">⚙ Impresora</button></div>
     </div>
-    <div class="caja">
+    <div class="caja ${CJ.vista === 'imagenes' ? 'con-img' : 'solo-lista'}">
       <section class="caja-buscar">
-        <input id="cj-q" type="search" placeholder="Escanea o busca: nombre, código. Usa 3*código para varias piezas" autocomplete="off" value="${esc(CJ.q)}">
+        <div class="cj-busca"><input id="cj-q" type="search" placeholder="Escanea o busca (3*código = 3 piezas)" title="Escanea o busca por nombre o código. Escribe 3*código para agregar 3 piezas." autocomplete="off" value="${esc(CJ.q)}">
+          <div class="seg" id="cj-vista" role="group" aria-label="Vista de productos"><button type="button" data-vista="imagenes" class="${CJ.vista === 'imagenes' ? 'activo' : ''}">Con imágenes</button><button type="button" data-vista="lista" class="${CJ.vista === 'lista' ? 'activo' : ''}">Solo lista</button></div></div>
         <div class="cats" id="cj-cats"></div>
-        <div class="cj-res" id="cj-res"></div>
+        <div class="cj-res ${CJ.vista === 'lista' ? 'en-lista' : ''}" id="cj-res"></div>
       </section>
+      <div class="caja-der">
+      ${CJ.vista === 'imagenes' ? '<aside class="caja-visor" id="cj-visor"></aside>' : ''}
       <aside class="caja-ticket">
+        <div class="cj-cuentas" id="cj-cuentas"></div>
         <button type="button" class="cj-cliente" id="cj-cliente"></button>
         <div class="cj-lineas" id="cj-lineas"></div>
         <div class="cj-total" id="cj-total"></div>
         <div class="acciones"><button type="button" class="btn cobrar" id="cj-cobrar">Cobrar <small>(F2)</small></button>
           <button type="button" class="btn sec" id="cj-vaciar">Vaciar</button></div>
       </aside>
+      </div>
     </div>
     <div class="cj-movil" id="cj-movil"><button type="button" class="cj-ver" id="cj-ver"></button><button type="button" class="btn cobrar" id="cj-cobrar2">Cobrar</button></div>`;
 
@@ -2534,11 +2595,36 @@ function vCaja(el) {
     const lista = S.catalogo.productos
       .filter(p => esActivo(p.activo) && (!CJ.cat || p.categoria_id === CJ.cat) && (!t || coincide(p, t)))
       .sort(porNombre).slice(0, 60);
+    const conImg = CJ.vista === 'imagenes';
     $('#cj-res', el).innerHTML = lista.length ? lista.map(p => {
       const c = ex[E.corte.almacen_id + '|' + p.id] || 0;
-      return `<button type="button" class="prod" data-p="${esc(p.id)}"><b>${esc(p.nombre)}</b>
-        <span class="fila-oc"><span class="precio">${dinero(precioCliente(p, cli))}</span><small class="${c <= 0 ? 'txt-error' : ''}">${numero(c)} ${esc(p.unidad || '')}</small></span></button>`;
+      const exis = `<small class="${c <= 0 ? 'txt-error' : ''}">${numero(c)} ${esc(p.unidad || '')}</small>`;
+      if (!conImg) return `<button type="button" class="prod-fila" data-p="${esc(p.id)}"><span>${esc(p.nombre)}</span><span class="precio">${dinero(precioCliente(p, cli))}</span>${exis}</button>`;
+      return `<button type="button" class="prod" data-p="${esc(p.id)}"><span class="prod-img">${p.imagen ? `<img data-img="${esc(p.imagen)}" alt="">` : `<i>${esc(iniciales(p.nombre))}</i>`}</span><b>${esc(p.nombre)}</b>
+        <span class="fila-oc"><span class="precio">${dinero(precioCliente(p, cli))}</span>${exis}</span></button>`;
     }).join('') : '<p class="nota">Sin productos que coincidan.</p>';
+    if (conImg) cargarImgs($('#cj-res', el));
+  };
+  // Imagen y descripción del último producto registrado en la cuenta
+  const pintarVisor = () => {
+    const v = $('#cj-visor', el);
+    if (!v) return;
+    const p = S.idx.prod[CJ.ticket.ultimo];
+    if (!p) { v.innerHTML = '<div class="vis-vacio">Aquí verás la imagen y la descripción del producto que registres.</div>'; return; }
+    const c = mapaExistencias()[E.corte.almacen_id + '|' + p.id] || 0;
+    const l = CJ.ticket.lineas.find(x => x.producto_id === p.id);
+    v.innerHTML = `<div class="vis-img">${p.imagen ? `<img data-img="${esc(p.imagen)}" alt="">` : `<i>${esc(iniciales(p.nombre))}</i>`}</div>
+      <div class="vis-txt"><b>${esc(p.nombre)}</b><span class="precio">${dinero(l ? l.precio : precioCliente(p, clientePorId(CJ.ticket.cliente_id)))}${l ? ` <small>× ${numero(l.cantidad)}</small>` : ''}</span>
+        ${p.descripcion ? `<p>${esc(p.descripcion)}</p>` : ''}<small>${p.codigo_barras ? esc(p.codigo_barras) + ' · ' : ''}Existencia: ${numero(c)} ${esc(p.unidad || '')}</small></div>`;
+    cargarImgs(v);
+  };
+  const pintarCuentas = () => {
+    const varias = CJ.cuentas.length > 1;
+    $('#cj-cuentas', el).innerHTML = CJ.cuentas.map(c => {
+      const act = c.id === CJ.activa;
+      return `<div class="cta ${act ? 'activa' : ''}"><button type="button" class="cta-sel" data-cta="${esc(c.id)}"><span>${esc(nombreCuenta(c))}</span><small>${c.lineas.length ? dinero(totalCuenta(c)) : 'vacía'}</small></button>
+        ${act ? `<button type="button" class="icono" data-ren title="Ponerle nombre">✎</button>` : ''}${varias ? `<button type="button" class="icono" data-cerrar-cta="${esc(c.id)}" title="Cerrar cuenta">✕</button>` : ''}</div>`;
+    }).join('') + '<button type="button" class="cta-nueva" id="cj-nueva" title="Atender a otro cliente sin perder esta cuenta (F4)">+ Nueva cuenta</button>';
   };
   const pintarTicket = () => {
     const cli = clientePorId(CJ.ticket.cliente_id);
@@ -2554,6 +2640,9 @@ function vCaja(el) {
         ${esAdminCaja() ? `<input class="cj-precio" type="number" step="0.01" min="0" data-precio="${i}" value="${l.precio}" title="Precio">` : ''}
         <b class="cj-imp">${dinero(l.cantidad * l.precio)}</b><button type="button" class="icono" data-quitar="${i}" title="Quitar">✕</button></div>`;
     }).join('') : '<p class="nota cj-vacio">Escanea o toca un producto para agregarlo.</p>');
+    pintarCuentas();
+    pintarVisor();
+    guardarCuentas();
     const total = totalTicket();
     $('#cj-total', el).innerHTML = `<span>${plural(L.reduce((s, l) => s + Number(l.cantidad), 0), 'artículo')}</span><b>${dinero(total)}</b>`;
     $('#cj-cobrar', el).disabled = !L.length;
@@ -2565,6 +2654,7 @@ function vCaja(el) {
     const ya = CJ.ticket.lineas.find(l => l.producto_id === p.id);
     if (ya) ya.cantidad = Math.round((Number(ya.cantidad) + cantidad) * 1000) / 1000;
     else CJ.ticket.lineas.push({ producto_id: p.id, cantidad, precio: precioCliente(p, cli) });
+    CJ.ticket.ultimo = p.id;
     pintarTicket();
   };
   CJ.repintar = () => { pintarRes(); pintarTicket(); };
@@ -2629,11 +2719,60 @@ function vCaja(el) {
     pintarTicket(); pintarRes();
   });
   $('#cj-vaciar', el).onclick = () => {
-    if (CJ.ticket.lineas.length && !confirm('¿Vaciar el ticket?')) return;
-    CJ.ticket = { cliente_id: '', lineas: [] };
+    if (CJ.ticket.lineas.length && !confirm('¿Vaciar esta cuenta?')) return;
+    Object.assign(CJ.ticket, { cliente_id: '', lineas: [], ultimo: '' });
     pintarTicket(); pintarRes();
   };
-  $('#cj-cobrar', el).onclick = () => dlgCobrar(() => { CJ.ticket = { cliente_id: '', lineas: [] }; vCaja(el); });
+  // Cuentas: cambiar, nombrar, cerrar y abrir otra
+  const activar = id => {
+    const act = CJ.ticket;
+    if (id !== act.id && cuentaVacia(act)) CJ.cuentas = CJ.cuentas.filter(c => c !== act);
+    CJ.activa = id;
+    pintarTicket(); pintarRes();
+    q.focus();
+  };
+  $('#cj-cuentas', el).onclick = e => {
+    const sel = e.target.closest('[data-cta]');
+    if (sel) return activar(sel.dataset.cta);
+    if (e.target.closest('[data-ren]')) {
+      const n = prompt('Nombre para identificar esta cuenta (ej. "Señora de blusa azul"):', nombreCuenta(CJ.ticket));
+      if (n !== null) { CJ.ticket.nombre = n.trim().slice(0, 30); pintarTicket(); }
+      return;
+    }
+    const cer = e.target.closest('[data-cerrar-cta]');
+    if (cer) {
+      const c = CJ.cuentas.find(x => x.id === cer.dataset.cerrarCta);
+      if (c.lineas.length && !confirm(`¿Descartar "${nombreCuenta(c)}" con ${plural(c.lineas.length, 'producto')}?`)) return;
+      CJ.cuentas = CJ.cuentas.filter(x => x !== c);
+      if (!CJ.cuentas.length) nuevaCuenta();
+      else if (CJ.activa === c.id) CJ.activa = CJ.cuentas[CJ.cuentas.length - 1].id;
+      pintarTicket(); pintarRes();
+      return;
+    }
+    if (e.target.closest('#cj-nueva')) {
+      if (cuentaVacia(CJ.ticket)) { toast('Esta cuenta está vacía: úsala para el siguiente cliente.', ''); q.focus(); return; }
+      nuevaCuenta();
+      pintarTicket(); pintarRes();
+      q.focus();
+    }
+  };
+  $('#cj-vista', el).onclick = e => {
+    const b = e.target.closest('[data-vista]');
+    if (!b || b.dataset.vista === CJ.vista) return;
+    CJ.vista = b.dataset.vista;
+    DB.set('caja:vista', CJ.vista);
+    vCaja(el);
+  };
+  $('#cj-cobrar', el).onclick = () => dlgCobrar(() => {
+    // La cuenta cobrada se cierra; las demás siguen abiertas
+    CJ.cuentas = CJ.cuentas.filter(c => c.id !== CJ.activa);
+    const espera = CJ.cuentas.filter(c => c.lineas.length).length;
+    CJ.cuentas = CJ.cuentas.filter(c => !cuentaVacia(c));
+    nuevaCuenta();
+    guardarCuentas();
+    if (espera) toast(`${espera === 1 ? 'Queda 1 cuenta abierta' : `Quedan ${espera} cuentas abiertas`}: tócala arriba del ticket para seguir cobrándola.`, 'aviso');
+    vCaja(el);
+  });
   $('#cj-cobrar2', el).onclick = () => $('#cj-cobrar', el).click();
   $('#cj-ver', el).onclick = () => $('.caja-ticket', el).scrollIntoView({ behavior: 'smooth', block: 'start' });
   $('#cj-ventas', el).onclick = () => dlgVentasTurno(() => vCaja(el));
@@ -2871,7 +3010,7 @@ function imprimirHTML(cuerpo, copias = 1) {
 function htmlDoc(ops) {
   return ops.map(o => {
     switch (o.k) {
-      case 'logo': return IMP.logo ? '<img src="icons/icon-192.png" alt="">' : '';
+      case 'logo': return IMP.logo ? `<img src="${esc(logoSrc())}" alt="">` : '';
       case 'titulo': return `<h1>${esc(o.s)}</h1>`;
       case 'centro': return `<div class="c">${o.neg ? '<b>' : ''}${esc(o.s).replace(/\n/g, '<br>')}${o.neg ? '</b>' : ''}</div>`;
       case 'sep': return '<hr>';
@@ -2925,7 +3064,7 @@ const cacheLogo = {};
 async function logoRaster(anchoPuntos) {
   if (cacheLogo[anchoPuntos]) return cacheLogo[anchoPuntos];
   const img = new Image();
-  img.src = 'icons/icon-192.png';
+  img.src = logoSrc();
   await img.decode();
   const w = anchoPuntos, h = Math.round(img.height * w / img.width);
   const cv = document.createElement('canvas');
@@ -3424,6 +3563,8 @@ function resumenCorteLocal() {
 }
 
 function dlgCerrarCaja(alTerminar) {
+  const abiertas = (CJ.cuentas || []).filter(c => c.lineas.length);
+  if (abiertas.length && !confirm(`Hay ${plural(abiertas.length, 'cuenta')} sin cobrar (${abiertas.map(nombreCuenta).join(', ')}). Se conservan para el siguiente turno. ¿Cerrar la caja de todos modos?`)) return;
   const r = resumenCorteLocal();
   const fila = (t, n) => `<span>${t}</span><span>${dinero(n)}</span>`;
   const d = abrirModal('Cerrar caja (corte)', `
@@ -4190,7 +4331,7 @@ function imprimirRemision(p, e) {
   }).join('');
   const iva = Math.round(sub * (Number(p.iva_tasa) || 0)) / 100;
   imprimirDocumento(`Remisión ${e.folio}`, `
-    <div class="cab"><div style="display:flex;gap:10px;align-items:center"><img src="icons/icon-192.png" alt=""><div><h1>${esc(CFG.NOMBRE)}</h1>${esc(orig.nombre || '')}${orig.direccion ? '<br>' + esc(orig.direccion) : ''}</div></div>
+    <div class="cab"><div style="display:flex;gap:10px;align-items:center"><img src="${esc(logoSrc())}" alt=""><div><h1>${esc(CFG.NOMBRE)}</h1>${esc(orig.nombre || '')}${orig.direccion ? '<br>' + esc(orig.direccion) : ''}</div></div>
       <div style="text-align:right"><h1>REMISIÓN</h1><div class="folio">${esc(e.folio)}</div>Pedido ${esc(p.folio)}<br>${fechaHora(e.fecha)}</div></div>
     <div class="cajas"><div class="caja"><h3>${externo ? 'Cliente' : 'Sucursal'}</h3><b>${esc(externo ? cli.nombre || '' : dest.nombre || '')}</b><br>
       ${esc(externo ? cli.direccion || '' : dest.direccion || '')}${(externo ? cli.telefono : dest.telefono) ? '<br>Tel. ' + esc(externo ? cli.telefono : dest.telefono) : ''}${externo && cli.rfc ? '<br>RFC ' + esc(cli.rfc) : ''}</div>
@@ -4399,7 +4540,7 @@ async function vEstadoCuenta(el) {
     ${abonos.length ? `<h3>Pagos recibidos</h3><div class="tabla-cont"><table class="tabla"><thead><tr><th>Fecha</th><th>Forma de pago</th><th>Referencia</th><th class="num">Monto</th></tr></thead>
       <tbody>${abonos.map(a => `<tr><td>${fechaCorta(a.fecha_abono)}</td><td>${METODO_TXT[a.metodo] || a.metodo}</td><td>${esc(a.referencia || '')}</td><td class="num">${dinero(a.monto)}</td></tr>`).join('')}</tbody></table></div>` : ''}`;
   $('#ec-imp', el).onclick = () => imprimirDocumento('Estado de cuenta', `
-    <div class="cab"><div style="display:flex;gap:10px;align-items:center"><img src="icons/icon-192.png" alt=""><h1>${esc(CFG.NOMBRE)}</h1></div>
+    <div class="cab"><div style="display:flex;gap:10px;align-items:center"><img src="${esc(logoSrc())}" alt=""><h1>${esc(CFG.NOMBRE)}</h1></div>
       <div style="text-align:right"><h1>ESTADO DE CUENTA</h1>${fechaCorta(hoy)}</div></div>
     <div class="cajas"><div class="caja"><h3>Cliente</h3><b>${esc(cli.nombre)}</b>${cli.rfc ? '<br>RFC ' + esc(cli.rfc) : ''}</div>
       <div class="caja"><h3>Resumen</h3>Saldo: <b>${dinero(cli.saldo)}</b><br>Vencido: ${dinero(cli.vencido)}${cli.credito ? '<br>Crédito disponible: ' + dinero(D.disponible) : ''}</div></div>
@@ -4569,8 +4710,11 @@ function vCuenta(el) {
       <p>Datos guardados: ${numero(S.catalogo.productos.length)} productos, ${numero(S.catalogo.almacenes.length)} almacenes.</p>
       <p>Última actualización: <b>${S.ultimaSync ? fechaHora(S.ultimaSync) : 'nunca'}</b></p>
       <p class="nota" id="persist"></p>
-      <div class="acciones"><button type="button" class="btn" id="b-sync">Sincronizar ahora</button><button type="button" class="btn sec" id="b-inst" ${promptInstalar ? '' : 'hidden'}>Instalar en este equipo</button></div>
+      <div class="acciones"><button type="button" class="btn" id="b-sync">Sincronizar ahora</button><button type="button" class="btn sec" id="b-inst" ${promptInstalar ? '' : 'hidden'}>Instalar en este equipo</button>
+        ${S.catalogo.productos.some(p => p.imagen) ? '<button type="button" class="btn sec" id="b-imgs">Descargar imágenes de productos</button>' : ''}</div>
+      <label class="letra-equipo">Tamaño de letra en este equipo<select id="b-letra"><option value="0">Igual que la empresa</option>${LETRAS.map(([v, t]) => `<option value="${v}">${t}</option>`).join('')}</select></label>
     </div>
+    ${esGeneral() ? `<div class="panel"><h3>Apariencia</h3><p class="nota">Nombre, logo, colores, tema, tamaño de letra e imagen de fondo para todos los equipos.</p><button type="button" class="btn sec" id="b-apar">Cambiar apariencia</button></div>` : ''}
     ${esGeneral() ? `<div class="panel"><h3>Empresa</h3><p class="nota">Nombre, RFC, dirección y logo que aparecen en las órdenes de compra.</p><button type="button" class="btn sec" id="b-empresa">Datos de la empresa</button></div>` : ''}
     ${esAdminCaja() || rol() === 'CAJERO' ? `<div class="panel"><h3>Impresora de tickets</h3><p class="nota">Ancho del papel, ticket doble, logo y cómo imprimir directo en este equipo.</p><button type="button" class="btn sec" id="b-imp">Configurar impresora</button></div>` : ''}
     <div class="panel"><h3>Contraseña</h3><button type="button" class="btn sec" id="b-pass">Cambiar contraseña</button></div>
@@ -4584,6 +4728,13 @@ function vCuenta(el) {
     });
   }
   $('#b-sync', el).onclick = () => sincronizar(true);
+  const bl = $('#b-letra', el);
+  bl.value = String(APAR.letraEquipo || 0);
+  bl.onchange = async () => { APAR.letraEquipo = Number(bl.value) || 0; await DB.set('letra-equipo', APAR.letraEquipo); aplicarApariencia(); };
+  const bimgs = $('#b-imgs', el);
+  if (bimgs) bimgs.onclick = descargarImagenes;
+  const bap = $('#b-apar', el);
+  if (bap) bap.onclick = dlgApariencia;
   $('#b-pass', el).onclick = () => dlgCambiarPassword(false);
   const bimp = $('#b-imp', el);
   if (bimp) bimp.onclick = dlgImpresora;
@@ -4629,6 +4780,226 @@ function dlgCambiarPassword(obligatorio) {
   };
 }
 
+/* ---------------- Apariencia ---------------- */
+// La define el administrador general para toda la empresa; el tamaño de letra se puede ajustar en cada equipo.
+const APAR = { datos: null, letraEquipo: 0 };
+const LOGO_APP = 'icons/icon-192.png';
+const logoSrc = () => (APAR.datos && APAR.datos.logo) || LOGO_APP;
+const LETRAS = [[0.9, 'Pequeña'], [1, 'Normal'], [1.15, 'Grande'], [1.3, 'Muy grande']];
+
+function textoSobre(hex) {
+  const n = parseInt(String(hex).slice(1), 16);
+  const l = 0.299 * (n >> 16) + 0.587 * ((n >> 8) & 255) + 0.114 * (n & 255);
+  return l > 160 ? '#111111' : '#ffffff';
+}
+
+function aplicarApariencia(a = APAR.datos) {
+  const c = (a && a.config) || {};
+  const r = document.documentElement;
+  const css = (k, v) => (v ? r.style.setProperty(k, v) : r.style.removeProperty(k));
+  css('--marca-primario', c.primario);
+  css('--marca-primario-txt', c.primario ? textoSobre(c.primario) : '');
+  css('--marca-acento', c.acento);
+  if (c.tema === 'claro' || c.tema === 'oscuro') r.dataset.tema = c.tema; else delete r.dataset.tema;
+  css('--escala', String(APAR.letraEquipo || c.letra || 1));
+  const fondo = a && a.fondo;
+  document.body.classList.toggle('con-fondo', !!fondo);
+  css('--fondo-img', fondo ? `url("${fondo}")` : '');
+  css('--velo', fondo ? (c.velo || 82) + '%' : '');
+  const logo = (a && a.logo) || LOGO_APP;
+  $$('.marca img, .login-caja img').forEach(im => { if (im.getAttribute('src') !== logo) im.src = logo; });
+  const ico = document.querySelector('link[rel=icon]');
+  if (ico) ico.href = logo;
+  CFG.NOMBRE = c.nombre || CFG.NOMBRE_ORIGINAL;
+  document.title = CFG.NOMBRE;
+  $('#login-titulo').textContent = CFG.NOMBRE;
+  $('#app-nombre').textContent = CFG.NOMBRE;
+  Object.keys(cacheLogo).forEach(k => delete cacheLogo[k]);
+}
+
+async function cargarApariencia() {
+  APAR.datos = (await DB.get('apariencia')) || null;
+  APAR.letraEquipo = Number(await DB.get('letra-equipo')) || 0;
+  aplicarApariencia();
+}
+
+// Se llama al sincronizar: si la versión cambió, descarga la apariencia nueva
+async function revisarApariencia(v) {
+  if (v === undefined || (APAR.datos && APAR.datos.version === v) || (!APAR.datos && !v)) return;
+  try {
+    APAR.datos = await api('apariencia');
+    await DB.set('apariencia', APAR.datos);
+    aplicarApariencia();
+  } catch (e) { /* se reintenta en la siguiente sincronización */ }
+}
+
+// Reduce una imagen elegida por el usuario. Devuelve un data URL que no pasa de "limite" caracteres.
+function reducirImagen(archivo, max, { tipo = 'image/jpeg', limite = 400000, fondoBlanco = tipo === 'image/jpeg' } = {}) {
+  return new Promise((ok, mal) => {
+    const url = URL.createObjectURL(archivo);
+    const im = new Image();
+    im.onload = () => {
+      URL.revokeObjectURL(url);
+      let lado = max, res = '';
+      for (let i = 0; i < 6; i++) {
+        const e = Math.min(1, lado / Math.max(im.width, im.height));
+        const c = document.createElement('canvas');
+        c.width = Math.max(1, Math.round(im.width * e));
+        c.height = Math.max(1, Math.round(im.height * e));
+        const g = c.getContext('2d');
+        if (fondoBlanco) { g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height); }
+        g.drawImage(im, 0, 0, c.width, c.height);
+        res = c.toDataURL(tipo, 0.8);
+        if (res.length > limite && tipo === 'image/png') res = c.toDataURL('image/jpeg', 0.85);
+        if (res.length <= limite) return ok(res);
+        lado = Math.round(lado * 0.75);
+      }
+      mal(new Error('La imagen es demasiado grande.'));
+    };
+    im.onerror = () => { URL.revokeObjectURL(url); mal(new Error('No se pudo leer la imagen. Usa JPG o PNG.')); };
+    im.src = url;
+  });
+}
+
+/* ---------------- Imágenes de productos ---------------- */
+// Se guardan en el equipo al verlas por primera vez; así la caja las muestra aunque no haya internet.
+const IMGS = { mem: {}, cola: new Set(), esperando: [], timer: null };
+
+async function imagenLocal(id) {
+  if (!id) return '';
+  if (IMGS.mem[id]) return IMGS.mem[id];
+  const v = await DB.get('img:' + id);
+  if (v) IMGS.mem[id] = v;
+  return v || '';
+}
+
+// Pide al servidor las que no están en el equipo (en grupos)
+function pedirImagenes(ids) {
+  return new Promise(resolver => {
+    ids.forEach(id => IMGS.cola.add(id));
+    IMGS.esperando.push(resolver);
+    clearTimeout(IMGS.timer);
+    IMGS.timer = setTimeout(async () => {
+      const lista = [...IMGS.cola];
+      const fin = IMGS.esperando;
+      IMGS.cola.clear();
+      IMGS.esperando = [];
+      if (navigator.onLine && S.online !== false) {
+        for (let i = 0; i < lista.length; i += 20) {
+          try {
+            const r = await api('imagenes', { ids: lista.slice(i, i + 20) });
+            for (const [id, url] of Object.entries(r)) { IMGS.mem[id] = url; await DB.set('img:' + id, url); }
+          } catch (e) { break; }
+        }
+      }
+      fin.forEach(f => f());
+    }, 120);
+  });
+}
+
+// Pone la imagen en cada <img data-img="id"> del contenedor
+async function cargarImgs(cont) {
+  const faltan = [];
+  for (const im of $$('img[data-img]', cont)) {
+    const url = await imagenLocal(im.dataset.img);
+    if (url) { im.src = url; im.classList.add('lista'); } else faltan.push(im);
+  }
+  if (!faltan.length) return;
+  await pedirImagenes([...new Set(faltan.map(im => im.dataset.img))]);
+  faltan.forEach(im => {
+    const url = IMGS.mem[im.dataset.img];
+    if (url && im.isConnected) { im.src = url; im.classList.add('lista'); }
+  });
+}
+
+// Descarga al equipo todas las imágenes de productos (para usar la caja sin internet)
+async function descargarImagenes() {
+  const ids = [...new Set(S.catalogo.productos.filter(p => esActivo(p.activo) && p.imagen).map(p => p.imagen))];
+  const faltan = [];
+  for (const id of ids) if (!(await imagenLocal(id))) faltan.push(id);
+  if (!faltan.length) { toast(`Las ${plural(ids.length, 'imagen')} ya están en este equipo.`, 'ok'); return; }
+  if (!navigator.onLine) { toast('Necesitas conexión para descargar las imágenes.', 'error'); return; }
+  await conCarga(`Descargando ${plural(faltan.length, 'imagen')}…`, () => pedirImagenes(faltan));
+  const listas = faltan.filter(id => IMGS.mem[id]).length;
+  toast(`${plural(listas, 'imagen')} ${listas === 1 ? 'guardada' : 'guardadas'} en este equipo.`, listas ? 'ok' : 'error');
+}
+
+/* ---------------- Diálogo de apariencia ---------------- */
+function dlgApariencia() {
+  const actual = APAR.datos || { config: {}, logo: '', fondo: '' };
+  const c = Object.assign({ primario: '#0172b6', acento: '#e0de27', tema: 'auto', letra: 1, velo: 82, nombre: '' }, actual.config);
+  let logo = actual.logo || '', fondo = actual.fondo || '';
+  let logoCambio = false, fondoCambio = false;
+  const d = abrirModal('Apariencia de la app', `
+    <form id="fap" class="form">
+      <p class="nota">Se aplica en todos los equipos de la empresa. Los cambios se ven aquí mismo antes de guardar.</p>
+      <label>Nombre que aparece en la app<input name="nombre" maxlength="60" value="${esc(c.nombre)}" placeholder="${esc(CFG.NOMBRE_ORIGINAL)}"></label>
+      <div class="campo"><span>Logo (app, tickets y órdenes de compra)</span>
+        <div class="fila-form"><img id="ap-logo" class="logo-prev" alt="" src="${esc(logo || LOGO_APP)}">
+          <div class="acciones"><label class="btn sec">Cambiar logo<input type="file" accept="image/png,image/jpeg" id="ap-logo-arch" hidden></label>
+          <button type="button" class="btn sec" id="ap-logo-quitar">Usar el original</button></div></div></div>
+      <div class="fila3">
+        <label>Color principal<input name="primario" type="color" value="${esc(c.primario)}"></label>
+        <label>Color de acento<input name="acento" type="color" value="${esc(c.acento)}"></label>
+        <label>Tema<select name="tema"><option value="auto">Automático (según el equipo)</option><option value="claro">Claro</option><option value="oscuro">Oscuro</option></select></label>
+      </div>
+      <div class="acciones"><button type="button" class="btn mini sec" id="ap-marca">Colores de la marca</button></div>
+      <label>Tamaño de letra<select name="letra">${LETRAS.map(([v, t]) => `<option value="${v}">${t}</option>`).join('')}</select></label>
+      <div class="campo"><span>Imagen de fondo</span>
+        <div class="fila-form"><div id="ap-fondo" class="fondo-prev"></div>
+          <div class="acciones"><label class="btn sec">Elegir imagen<input type="file" accept="image/*" id="ap-fondo-arch" hidden></label>
+          <button type="button" class="btn sec" id="ap-fondo-quitar">Sin imagen</button></div></div></div>
+      <label id="ap-velo-l">Qué tanto se ve la imagen<input name="velo" type="range" min="40" max="95" step="1" value="${135 - Number(c.velo)}"></label>
+      <p class="msg" id="fap-msg"></p>
+      <div class="pie"><button type="button" class="btn sec" data-cerrar>Cancelar</button><button class="btn" type="submit">Guardar</button></div>
+    </form>`);
+  const f = $('#fap', d), msg = $('#fap-msg', d);
+  f.tema.value = c.tema;
+  f.letra.value = String(LETRAS.reduce((m, [v]) => (Math.abs(v - c.letra) < Math.abs(m - c.letra) ? v : m), 1));
+  const leer = () => ({ nombre: f.nombre.value.trim(), primario: f.primario.value, acento: f.acento.value, tema: f.tema.value,
+    letra: Number(f.letra.value), velo: 135 - Number(f.velo.value) });
+  const vista = () => {
+    const pf = $('#ap-fondo', d);
+    pf.style.backgroundImage = fondo ? `url("${fondo}")` : '';
+    pf.textContent = fondo ? '' : 'Sin imagen';
+    $('#ap-velo-l', d).hidden = !fondo;
+    $('#ap-logo', d).src = logo || LOGO_APP;
+    aplicarApariencia({ config: leer(), logo, fondo });
+  };
+  vista();
+  f.oninput = vista;
+  let guardado = false;
+  d.addEventListener('close', () => { if (!guardado) aplicarApariencia(); }, { once: true });
+  $('#ap-marca', d).onclick = () => { f.primario.value = '#0172b6'; f.acento.value = '#e0de27'; vista(); };
+  $('#ap-logo-arch', d).onchange = async e => {
+    const a = e.target.files[0];
+    if (!a) return;
+    try { logo = await reducirImagen(a, 256, { tipo: 'image/png', limite: 44000 }); logoCambio = true; vista(); } catch (er) { msg.textContent = er.message; }
+  };
+  $('#ap-logo-quitar', d).onclick = () => { logo = ''; logoCambio = true; vista(); };
+  $('#ap-fondo-arch', d).onchange = async e => {
+    const a = e.target.files[0];
+    if (!a) return;
+    try { fondo = await reducirImagen(a, 1600, { limite: 1000000 }); fondoCambio = true; vista(); } catch (er) { msg.textContent = er.message; }
+  };
+  $('#ap-fondo-quitar', d).onclick = () => { fondo = ''; fondoCambio = true; vista(); };
+  f.onsubmit = async ev => {
+    ev.preventDefault();
+    if (!navigator.onLine) { msg.textContent = 'Necesitas conexión para guardar la apariencia.'; return; }
+    const datos = { apariencia: leer() };
+    if (logoCambio) datos.logo = logo;
+    if (fondoCambio) datos.fondo = fondo;
+    try {
+      APAR.datos = await conCarga('Guardando apariencia…', () => api('guardarApariencia', datos));
+      await DB.set('apariencia', APAR.datos);
+      guardado = true;
+      cerrarModal();
+      aplicarApariencia();
+      toast('Apariencia guardada. Los demás equipos la verán al sincronizar.', 'ok');
+    } catch (e) { msg.textContent = e.message; }
+  };
+}
+
 /* ---------------- Arranque ---------------- */
 async function iniciar() {
   document.title = CFG.NOMBRE;
@@ -4646,6 +5017,7 @@ async function iniciar() {
   }
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
   await cargarImpresora().catch(() => {});
+  await cargarApariencia().catch(() => {});
 
   $('#form-login').addEventListener('submit', onLogin);
   $('#menu').addEventListener('click', e => { const b = e.target.closest('[data-v]'); if (b) irA(b.dataset.v); });
@@ -4662,6 +5034,7 @@ async function iniciar() {
   });
   document.addEventListener('keydown', e => {
     if (e.key === 'F2' && S.vista === 'caja' && !$('#dlg').open) { e.preventDefault(); const b = $('#cj-cobrar'); if (b && !b.disabled) b.click(); }
+    if (e.key === 'F4' && S.vista === 'caja' && !$('#dlg').open) { e.preventDefault(); const b = $('#cj-nueva'); if (b) b.click(); }
   });
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible' && S.usuario && navigator.onLine &&

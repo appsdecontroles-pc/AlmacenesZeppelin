@@ -1,6 +1,6 @@
 // Guarda la app en el equipo para que abra sin internet.
 // Al publicar cambios, sube el número de CACHE para forzar la actualización.
-const CACHE = 'inventario-v8';
+const CACHE = 'inventario-v9';
 const ARCHIVOS = ['./', './index.html', './app.js', './excel.js', './config.js', './styles.css', './manifest.json', './cargando.svg',
   './icons/icon-192.png', './icons/icon-512.png'];
 

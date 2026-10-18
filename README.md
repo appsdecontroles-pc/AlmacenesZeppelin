@@ -165,6 +165,33 @@ En **Caja > ⚙ Impresora** o **Mi cuenta > Configurar impresora**. Se guarda en
 
 **Correo:** se puede escribir al cobrar. Si la venta se hizo sin internet, el correo sale solo cuando la venta llega al servidor.
 
+## Varias cuentas abiertas en la caja
+
+- **Nueva cuenta (F4):** deja la cuenta actual en espera y abre otra para atender al siguiente cliente. Las cuentas aparecen como pestañas arriba del ticket, con su total.
+- **Cambiar de cuenta:** toca la pestaña. Con el lápiz ✎ le pones un nombre para reconocerla ("Señora de blusa azul").
+- **Al cobrar:** se cierra solo la cuenta cobrada; las demás siguen abiertas.
+- **Se guardan en el equipo:** no se pierden si se cierra la app o se va el internet. Al cerrar la caja, la app avisa si quedan cuentas sin cobrar.
+
+## Imágenes y descripción de productos
+
+- **En la ficha del producto:** "Agregar imagen" (foto o archivo; se reduce sola) y una descripción que verá el cajero. La descripción también se puede cargar desde Excel en la columna "Detalle para la caja".
+- **Vista de la caja (botones arriba a la derecha de la búsqueda):**
+  - **Con imágenes:** los productos salen con foto y, a la derecha, un recuadro con la imagen, descripción, precio y existencia del último producto registrado.
+  - **Solo lista:** renglones sencillos sin imágenes, más rápido en equipos lentos o con internet débil.
+- **Sin internet:** cada imagen se guarda en el equipo la primera vez que se ve. Para tenerlas todas antes, usa **Mi cuenta > Descargar imágenes de productos**.
+- **Dónde se guardan:** en la carpeta "Imágenes de la app" de Google Drive.
+
+## Apariencia
+
+En **Mi cuenta > Cambiar apariencia** (administrador general). Se aplica en todos los equipos al sincronizar.
+
+- Nombre de la app, logo (también sale en tickets y órdenes de compra), color principal, color de acento, tema claro u oscuro, tamaño de letra e imagen de fondo con su intensidad.
+- Los cambios se ven al momento; "Cancelar" los deshace.
+- Cada equipo puede ajustar su propio tamaño de letra en **Mi cuenta > Este equipo**.
+- El ícono con el que se instala la app no cambia: es el de la carpeta `icons`.
+
+Al actualizar el servidor a esta versión hay que ejecutar **instalar** otra vez (agrega las columnas de imagen y descripción a Productos).
+
 ## Cómo funciona sin internet
 
 - Al entrar y cada 15 minutos, la app descarga catálogo, precios y existencias, y los guarda en el equipo.
