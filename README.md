@@ -92,6 +92,41 @@ Al actualizar el servidor a esta versión hay que ejecutar **instalar** otra vez
 
 Al actualizar el servidor a esta versión hay que ejecutar **instalar** otra vez para crear las hojas nuevas.
 
+## Pedidos y portal de clientes (fase 5)
+
+**Pedidos** (administrador general, control de inventarios y administrador de sucursal):
+
+- **Origen del pedido:**
+  - Para un **cliente externo** (con sus precios y su crédito) o para una **sucursal** (traspaso valuado a costo).
+  - La sucursal lo **solicita** con "Solicitar mercancía"; el cliente, desde su portal.
+- **Tablero:** solicitados, programados (marca hoy y atrasados), en proceso y entregados.
+- **Aceptar y programar:** fecha de surtido y entrega.
+- **Lotear / surtir:** genera un envío (EN-00001), completo o parcial, que sale del inventario de la bodega e imprime la remisión.
+- **Confirmar entrega:** se captura lo recibido; lo que no llegó regresa a la bodega y queda pendiente para otro envío.
+  - **Sucursal:** entra a su inventario.
+  - **Cliente a crédito:** se suma a su crédito.
+  - **Cliente de contado:** se registra el cobro.
+- **Ajustes:**
+  - "Cancelar envío" regresa la mercancía a la bodega.
+  - "Cerrar con faltante" termina un pedido que ya no se completará.
+- **Reglas del crédito:**
+  - El cliente no puede pedir a crédito si rebasa su límite o tiene saldo vencido.
+  - La bodega sí puede capturarlo, con aviso, pero solo el administrador general autoriza el envío.
+
+**Portal del cliente** (usuario con rol "Cliente", ligado a un cliente en Usuarios):
+
+- **Inicio:** saldo, crédito disponible y vencido.
+- **Hacer pedido:** catálogo con sus precios y disponibilidad (sin mostrar existencias ni costos).
+- **Mis pedidos:** estado, envíos y remisiones.
+- **Estado de cuenta:** documentos, vencimientos y pagos, imprimible.
+
+**Avisos por correo:**
+
+- A la empresa: pedido nuevo, y cada mañana la agenda de pedidos por surtir y la cobranza vencida.
+- Al cliente (si tiene correo): pedido en camino, pedido entregado, recordatorio 5 días antes del vencimiento y aviso de vencido.
+
+Al actualizar el servidor a esta versión hay que ejecutar **instalar** otra vez.
+
 ## Cómo funciona sin internet
 
 - Al entrar y cada 15 minutos, la app descarga catálogo, precios y existencias, y los guarda en el equipo.

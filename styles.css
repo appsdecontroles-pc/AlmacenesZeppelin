@@ -386,3 +386,18 @@ details.panel-sub[open] summary { margin-bottom: 10px; }
   .cj-precio { display: none; }
   .cj-linea, .cj-linea:has(.cj-precio) { grid-template-columns: 1fr auto auto auto; }
 }
+
+/* Pedidos y portal */
+.ped-SOLICITADO { background: var(--aviso-suave); color: var(--aviso); }
+.ped-PROGRAMADO { background: var(--primario-suave); color: var(--primario); }
+.ped-EN_PROCESO { background: var(--primario); color: var(--primario-txt); }
+.ped-ENTREGADO { background: var(--ok-suave); color: var(--ok); }
+.ped-CANCELADO { background: var(--peligro-suave); color: var(--peligro); }
+.env-EN_RUTA { background: var(--aviso-suave); color: var(--aviso); }
+.env-ENTREGADO { background: var(--ok-suave); color: var(--ok); }
+.env-CANCELADO { background: var(--bg); color: var(--suave); border: 1px solid var(--borde); }
+.barra-avance { display: block; height: 6px; background: var(--borde); border-radius: 999px; overflow: hidden; margin-top: 4px; }
+.barra-avance span { display: block; height: 100%; background: var(--marca-verde); }
+.portal-acciones { display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 10px; align-items: stretch; }
+@media (max-width: 640px) { .portal-acciones { grid-template-columns: 1fr; } }
+.txt-ok { color: var(--ok); }

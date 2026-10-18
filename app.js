@@ -4,7 +4,7 @@
  * Servidor: Google Apps Script (API) + Google Sheets (base de datos). */
 
 const CFG = Object.assign({ NOMBRE: 'Control de Inventario', SYNC_MINUTOS: 15, API_URL: '' }, window.APP_CONFIG || {});
-const VERSION_APP = '4.0.0';
+const VERSION_APP = '5.0.0';
 
 const ROL_TXT = {
   ADMIN_GENERAL: 'Administrador general',
@@ -15,7 +15,8 @@ const ROL_TXT = {
 };
 const TIPO_TXT = {
   ENTRADA: 'Entrada', SALIDA: 'Salida', AJUSTE: 'Ajuste por conteo', TRASPASO: 'Traspaso',
-  TRASPASO_SALIDA: 'Traspaso (sale)', TRASPASO_ENTRADA: 'Traspaso (llega)'
+  TRASPASO_SALIDA: 'Traspaso (sale)', TRASPASO_ENTRADA: 'Traspaso (llega)',
+  VENTA: 'Venta', CANCELACION: 'Cancelación de venta', SURTIDO: 'Surtido de pedido', DEVOLUCION: 'Regreso a bodega', RECEPCION: 'Recepción de pedido'
 };
 const AYUDA_TIPO = {
   ENTRADA: 'Suma existencias: compras, devoluciones o carga inicial de inventario.',
@@ -33,7 +34,9 @@ const S = {
   refrescar: null,
   alertas: null,
   clientes: [],
-  precios: []
+  precios: [],
+  cliente: null,
+  avisos: null
 };
 const F = {}; // filtros que se recuerdan entre vistas
 let promptInstalar = null;
@@ -108,6 +111,13 @@ function coincide(p, q) {
 function upsert(lista, obj) {
   const i = lista.findIndex(x => x.id === obj.id);
   if (i >= 0) lista[i] = obj; else lista.push(obj);
+}
+
+// Reemplaza el contenido quitando antes el foco de un campo interno (evita un segundo repintado al perder el foco)
+function ponerHTML(cont, html) {
+  const a = document.activeElement;
+  if (a && cont.contains(a)) a.blur();
+  cont.innerHTML = html;
 }
 
 function toast(msg, tipo = '') {
@@ -252,7 +262,7 @@ function mapaExistencias() {
 
 /* ---------------- Sesión ---------------- */
 async function cargarSesion(ses) {
-  if (!S.usuario || S.usuario.usuario !== ses.usuario.usuario) { CMP.datos = null; CPP.datos = null; CJ.estado = null; VT.cli = null; VT.ventas = null; }
+  if (!S.usuario || S.usuario.usuario !== ses.usuario.usuario) { CMP.datos = null; CPP.datos = null; CJ.estado = null; VT.cli = null; VT.ventas = null; PD.datos = null; PT.datos = null; PT.carrito = null; }
   S.token = ses.token;
   S.usuario = ses.usuario;
   const [cat, ex, ver, rolCat, ult, out] = await Promise.all([
@@ -267,6 +277,8 @@ async function cargarSesion(ses) {
   S.alertas = esGeneral() ? (await DB.get('alertas')) || null : null;
   S.clientes = (await DB.get('clientes')) || [];
   S.precios = (await DB.get('precios')) || [];
+  S.cliente = rol() === 'CLIENTE' ? (await DB.get('cliente')) || null : null;
+  S.avisos = (await DB.get('avisos')) || null;
   indexar();
 }
 
@@ -405,6 +417,9 @@ async function sincronizar(manual = false) {
     await DB.set('existencias', S.existencias);
     S.alertas = d.alertas || null;
     await DB.set('alertas', S.alertas);
+    S.avisos = d.avisos || null;
+    await DB.set('avisos', S.avisos);
+    if (d.cliente) { S.cliente = d.cliente; await DB.set('cliente', S.cliente); }
     if (d.clientes) {
       // Conserva el saldo local de lo que aún no se envía (ventas a crédito y abonos en cola)
       const ajuste = {};
@@ -444,15 +459,20 @@ const VISTAS = {
   inventario: { titulo: 'Inventario', roles: ['ADMIN_GENERAL', 'ADMIN_SUCURSAL', 'INVENTARIOS', 'CAJERO'], render: vInventario },
   movimientos: { titulo: 'Movimientos', roles: ['ADMIN_GENERAL', 'ADMIN_SUCURSAL', 'INVENTARIOS'], render: vMovimientos },
   compras: { titulo: 'Compras', roles: ['ADMIN_GENERAL', 'INVENTARIOS'], render: vCompras },
+  pedidos: { titulo: 'Pedidos', roles: ['ADMIN_GENERAL', 'INVENTARIOS', 'ADMIN_SUCURSAL'], render: vPedidos },
   pagar: { titulo: 'Por pagar', roles: ['ADMIN_GENERAL'], render: vPagar },
   ventas: { titulo: 'Ventas', roles: ['ADMIN_GENERAL', 'ADMIN_SUCURSAL'], render: vVentas },
   almacenes: { titulo: 'Almacenes', roles: ['ADMIN_GENERAL'], render: vAlmacenes },
   usuarios: { titulo: 'Usuarios', roles: ['ADMIN_GENERAL', 'ADMIN_SUCURSAL'], render: vUsuarios },
+  tienda: { titulo: 'Hacer pedido', roles: ['CLIENTE'], render: vTienda },
+  mispedidos: { titulo: 'Mis pedidos', roles: ['CLIENTE'], render: vMisPedidos },
+  estado: { titulo: 'Estado de cuenta', roles: ['CLIENTE'], render: vEstadoCuenta },
   cuenta: { titulo: 'Mi cuenta', roles: null, render: vCuenta }
 };
 const puedeVer = k => !VISTAS[k].roles || VISTAS[k].roles.includes(rol());
 
 function mostrarLogin(usuario = '', msg = '') {
+  $('#toasts').innerHTML = '';
   $('#pantalla-app').hidden = true;
   $('#pantalla-login').hidden = false;
   const f = $('#form-login');
@@ -473,8 +493,9 @@ function mostrarApp() {
 function pintarMenu() {
   $('#menu').innerHTML = Object.keys(VISTAS).filter(puedeVer)
     .map(k => {
-      const n = k === 'pagar' && S.alertas ? S.alertas.vencidas + S.alertas.por_vencer : 0;
-      return `<button type="button" data-v="${k}" class="${S.vista === k ? 'activo' : ''}">${VISTAS[k].titulo}${n ? `<span class="burbuja ${S.alertas.vencidas ? 'roja' : ''}">${n}</span>` : ''}</button>`;
+      const n = k === 'pagar' && S.alertas ? S.alertas.vencidas + S.alertas.por_vencer
+        : k === 'pedidos' && S.avisos ? S.avisos.solicitados + S.avisos.por_surtir + (rol() === 'ADMIN_SUCURSAL' ? S.avisos.en_ruta : 0) : 0;
+      return `<button type="button" data-v="${k}" class="${S.vista === k ? 'activo' : ''}">${VISTAS[k].titulo}${n ? `<span class="burbuja ${k === 'pagar' && S.alertas.vencidas ? 'roja' : ''}">${n}</span>` : ''}</button>`;
     }).join('');
 }
 
@@ -508,10 +529,7 @@ function actualizarBarra() {
 
 /* ---- Inicio ---- */
 function vInicio(el) {
-  if (rol() === 'CLIENTE') {
-    el.innerHTML = `<div class="panel"><h2>Hola, ${esc(S.usuario.nombre)}</h2><p>Tu portal de cliente (pedidos, entregas y estado de cuenta) estará disponible en una próxima fase.</p></div>`;
-    return;
-  }
+  if (rol() === 'CLIENTE') return vInicioPortal(el);
   const alms = almacenesVisibles();
   const ex = mapaExistencias();
   const prods = S.catalogo.productos.filter(p => esActivo(p.activo));
@@ -534,6 +552,10 @@ function vInicio(el) {
       <div class="tarjeta"><span>${esGeneral() ? 'Almacenes activos' : 'Almacén'}</span><b>${esGeneral() ? alms.length : esc(miAlm ? miAlm.nombre : '—')}</b></div>
       <button type="button" class="tarjeta ${bajos ? 'alerta' : ''}" id="t-bajos"><span>Bajo mínimo</span><b>${numero(bajos)}</b></button>
       ${veCostos() ? `<div class="tarjeta"><span>Valor del inventario (costo)</span><b>${dinero(valor)}</b></div>` : ''}
+      ${S.avisos && (S.avisos.solicitados || S.avisos.por_surtir || S.avisos.en_ruta) ? `
+        <button type="button" class="tarjeta ${S.avisos.solicitados ? 'alerta' : ''}" data-ir-ped="1"><span>Pedidos por atender</span><b>${S.avisos.solicitados + S.avisos.por_surtir}</b><small>${plural(S.avisos.solicitados, 'solicitud')} · ${S.avisos.por_surtir} por surtir hoy</small></button>
+        <button type="button" class="tarjeta" data-ir-ped="1"><span>Envíos en ruta</span><b>${S.avisos.en_ruta}</b></button>` : ''}
+      ${esGeneral() && S.avisos && S.avisos.cobrar_vencido_n ? `<button type="button" class="tarjeta alerta-roja" data-ir-cob="1"><span>Cobranza vencida</span><b>${dinero(S.avisos.cobrar_vencido)}</b><small>${plural(S.avisos.cobrar_vencido_n, 'cuenta')}</small></button>` : ''}
       ${esGeneral() && S.alertas ? `
         <button type="button" class="tarjeta ${S.alertas.vencidas ? 'alerta-roja' : ''}" data-pagos="vencidas"><span>Pagos vencidos</span><b>${dinero(S.alertas.monto_vencido)}</b><small>${plural(S.alertas.vencidas, 'cuenta')}</small></button>
         <button type="button" class="tarjeta ${S.alertas.por_vencer ? 'alerta' : ''}" data-pagos="por_vencer"><span>Pagos que vencen en ${S.alertas.dias} días</span><b>${dinero(S.alertas.monto_por_vencer)}</b><small>${plural(S.alertas.por_vencer, 'cuenta')}</small></button>` : ''}
@@ -551,6 +573,8 @@ function vInicio(el) {
   const tc = $('#t-caja', el);
   if (tc) tc.onclick = () => irA('caja');
   $$('[data-pagos]', el).forEach(b => { b.onclick = () => { CPP.filtro = b.dataset.pagos; irA('pagar'); }; });
+  $$('[data-ir-ped]', el).forEach(b => { b.onclick = () => irA('pedidos'); });
+  $$('[data-ir-cob]', el).forEach(b => { b.onclick = () => { VT.pestana = 'cobrar'; irA('ventas'); }; });
   S.refrescar = () => vInicio(el);
 }
 
@@ -2430,13 +2454,13 @@ function vCaja(el) {
          <small>${cli.credito ? `Crédito disponible ${dinero(creditoDisponible(cli))}${Number(cli.vencido) > 0 ? ' · <span class="txt-error">saldo vencido</span>' : ''}` : 'Sin crédito'} · cambiar</small>`
       : '<span><b>Público en general</b></span><small>Toca para elegir cliente</small>';
     const L = CJ.ticket.lineas;
-    $('#cj-lineas', el).innerHTML = L.length ? L.map((l, i) => {
+    ponerHTML($('#cj-lineas', el), L.length ? L.map((l, i) => {
       const p = S.idx.prod[l.producto_id] || {};
       return `<div class="cj-linea"><div class="cj-nombre">${esc(p.nombre || '—')}<small>${dinero(l.precio)} c/u</small></div>
         <div class="cj-cant"><button type="button" data-menos="${i}">−</button><input type="number" step="any" min="0" data-cant="${i}" value="${l.cantidad}"><button type="button" data-mas="${i}">+</button></div>
         ${esAdminCaja() ? `<input class="cj-precio" type="number" step="0.01" min="0" data-precio="${i}" value="${l.precio}" title="Precio">` : ''}
         <b class="cj-imp">${dinero(l.cantidad * l.precio)}</b><button type="button" class="icono" data-quitar="${i}" title="Quitar">✕</button></div>`;
-    }).join('') : '<p class="nota cj-vacio">Escanea o toca un producto para agregarlo.</p>';
+    }).join('') : '<p class="nota cj-vacio">Escanea o toca un producto para agregarlo.</p>');
     const total = totalTicket();
     $('#cj-total', el).innerHTML = `<span>${plural(L.reduce((s, l) => s + Number(l.cantidad), 0), 'artículo')}</span><b>${dinero(total)}</b>`;
     $('#cj-cobrar', el).disabled = !L.length;
@@ -3195,6 +3219,643 @@ async function pintarCobrar(c) {
   };
 }
 
+/* ---- Pedidos y surtido (fase 5) ---- */
+const PED_TXT = { SOLICITADO: 'Solicitado', PROGRAMADO: 'Programado', EN_PROCESO: 'En proceso', ENTREGADO: 'Entregado', CANCELADO: 'Cancelado' };
+const ENV_TXT = { EN_RUTA: 'En ruta', ENTREGADO: 'Entregado', CANCELADO: 'Cancelado' };
+const PD = { datos: null, cargado: 0, offline: false, pestana: 'tablero', q: '' };
+const chipPed = e => `<span class="est ped-${e}">${PED_TXT[e] || e}</span>`;
+const chipEnv = e => `<span class="est env-${e}">${ENV_TXT[e] || e}</span>`;
+const esBodegaRol = () => ['ADMIN_GENERAL', 'INVENTARIOS'].includes(rol());
+const destinoPedido = p => (p.tipo === 'EXTERNO'
+  ? ((clientePorId(p.cliente_id) || {}).nombre || (S.cliente && S.cliente.id === p.cliente_id ? S.cliente.nombre : 'Cliente'))
+  : ((S.idx.alm[p.destino_id] || {}).nombre || 'Sucursal'));
+const pendienteLinea = l => Math.max(0, Number(l.cantidad) - Number(l.entregado));
+const porSurtirLinea = l => Math.max(0, Number(l.cantidad) - Number(l.surtido));
+function avancePedido(p) {
+  const tot = p.lineas.reduce((s, l) => s + Number(l.cantidad), 0);
+  return tot ? Math.round(p.lineas.reduce((s, l) => s + Math.min(Number(l.entregado), Number(l.cantidad)), 0) / tot * 100) : 0;
+}
+
+async function cargarPedidos() {
+  if (!navigator.onLine) {
+    const snap = await DB.get('pedidos');
+    if (!snap || snap.usuario !== S.usuario.usuario) throw new Error('Sin conexión y sin datos guardados de pedidos en este equipo.');
+    Object.assign(PD, { datos: snap.datos, cargado: snap.fecha, offline: true });
+    return;
+  }
+  PD.datos = await api('pedidos');
+  PD.cargado = Date.now();
+  PD.offline = false;
+  guardarSnapshotPedidos();
+}
+const guardarSnapshotPedidos = () => DB.set('pedidos', { datos: PD.datos, fecha: PD.cargado, usuario: S.usuario.usuario }).catch(() => {});
+function actualizarPedidoLocal(p) {
+  upsert(PD.datos, p);
+  guardarSnapshotPedidos();
+  if (PD.repintar) PD.repintar();
+}
+
+function vPedidos(el) {
+  el.innerHTML = `
+    <div class="titulo"><h2>Pedidos</h2><div class="acciones">
+      <button type="button" class="btn sec" id="pd-recargar">Actualizar</button>
+      <button type="button" class="btn" id="pd-nuevo">${rol() === 'ADMIN_SUCURSAL' ? 'Solicitar mercancía' : 'Nuevo pedido'}</button></div></div>
+    <div class="segmentos" id="pd-tabs">${[['tablero', 'Tablero'], ['lista', 'Todos']].map(([k, t]) => `<button type="button" data-t="${k}">${t}</button>`).join('')}</div>
+    <div id="pd-aviso"></div><div id="pd-cuerpo"><p class="nota">Cargando…</p></div>`;
+  const cuerpo = $('#pd-cuerpo', el);
+  const pintar = () => {
+    $$('#pd-tabs button', el).forEach(b => b.classList.toggle('activo', b.dataset.t === PD.pestana));
+    $('#pd-aviso', el).innerHTML = PD.offline ? `<p class="aviso-offline">Sin conexión: datos de ${hace(PD.cargado)}. Solo consulta.</p>` : '';
+    if (PD.datos) (PD.pestana === 'tablero' ? pintarTableroPedidos : pintarListaPedidos)(cuerpo);
+  };
+  const recargar = async animar => {
+    try {
+      if (animar) await conCarga('Cargando pedidos…', cargarPedidos); else await cargarPedidos();
+      pintar();
+    } catch (e) {
+      cuerpo.innerHTML = `<p class="txt-error">${esc(e.message)}</p>`;
+      if (e.sesion) sesionVencida(e.message);
+    }
+  };
+  PD.repintar = pintar;
+  S.refrescar = pintar;
+  $('#pd-tabs', el).onclick = e => { const b = e.target.closest('[data-t]'); if (b) { PD.pestana = b.dataset.t; pintar(); } };
+  $('#pd-recargar', el).onclick = () => recargar(true);
+  $('#pd-nuevo', el).onclick = () => dlgEditorPedido(null);
+  cuerpo.onclick = e => {
+    const b = e.target.closest('[data-pd]');
+    if (b) dlgPedido(PD.datos.find(p => p.id === b.dataset.pd));
+  };
+  if (PD.datos) pintar();
+  if (!PD.datos || Date.now() - PD.cargado > 60000 || (PD.offline && navigator.onLine)) recargar(!PD.datos);
+}
+
+function tarjetaPedido(p) {
+  const hoy = hoyLocal();
+  const atrasado = ['PROGRAMADO', 'EN_PROCESO'].includes(p.estado) && p.fecha_entrega && p.fecha_entrega < hoy;
+  const enRuta = p.envios.filter(e => e.estado === 'EN_RUTA').length;
+  const av = avancePedido(p);
+  return `<button type="button" class="oc ${atrasado ? 'atrasada' : ''}" data-pd="${esc(p.id)}">
+    <span class="fila-oc"><span class="folio">${esc(p.folio)}</span><span class="est ${p.tipo === 'EXTERNO' ? 'est-ENVIADA' : 'est-BORRADOR'}">${p.tipo === 'EXTERNO' ? 'Cliente' : 'Sucursal'}</span></span>
+    <span>${esc(destinoPedido(p))}</span>
+    <span class="fila-oc"><small>${p.fecha_entrega ? (p.fecha_entrega === hoy ? '<b>Hoy</b>' : (atrasado ? '<b class="txt-error">Atrasado ' : '') + fechaCorta(p.fecha_entrega) + (atrasado ? '</b>' : '')) : 'Sin fecha'}${enRuta ? ` · ${enRuta} en ruta` : ''}</small><b>${dinero(p.total)}</b></span>
+    ${p.estado === 'EN_PROCESO' ? `<span class="barra-avance"><span style="width:${av}%"></span></span>` : ''}
+  </button>`;
+}
+
+function pintarTableroPedidos(c) {
+  const D = PD.datos, mes = sumarDiasYmd(hoyLocal(), -30);
+  const col = (clase, titulo, lista, vacio) => `<section class="columna ${clase}"><header><b>${titulo} (${lista.length})</b>
+    <small>${dinero(lista.reduce((s, p) => s + Number(p.total), 0))}</small></header>${lista.map(tarjetaPedido).join('') || `<p class="nota">${vacio}</p>`}</section>`;
+  const porFecha = (a, b) => String(a.fecha_entrega || '9').localeCompare(String(b.fecha_entrega || '9'));
+  c.innerHTML = `<div class="tablero">
+    ${col('c-proximas', 'Solicitados', D.filter(p => p.estado === 'SOLICITADO').sort(porFecha), 'Sin solicitudes nuevas.')}
+    ${col('c-enviadas', 'Programados', D.filter(p => p.estado === 'PROGRAMADO').sort(porFecha), 'Nada programado.')}
+    ${col('c-recibir', 'En proceso', D.filter(p => p.estado === 'EN_PROCESO').sort(porFecha), 'Sin pedidos en surtido.')}
+    ${col('c-recibidas', 'Entregados (30 días)', D.filter(p => p.estado === 'ENTREGADO' && String(p.cerrado).slice(0, 10) >= mes)
+      .sort((a, b) => String(b.cerrado).localeCompare(String(a.cerrado))), 'Sin entregas recientes.')}
+  </div>`;
+}
+
+function pintarListaPedidos(c) {
+  const q = normal(PD.q);
+  const l = PD.datos.filter(p => !q || normal(p.folio + ' ' + destinoPedido(p)).includes(q)).sort((a, b) => String(b.folio).localeCompare(String(a.folio)));
+  c.innerHTML = `<div class="filtros"><input id="pd-q" type="search" placeholder="Buscar folio, cliente o sucursal" value="${esc(PD.q)}"></div>
+    ${l.length ? `<div class="tabla-cont"><table class="tabla"><thead><tr><th>Folio</th><th>Para</th><th>Tipo</th><th>Entrega</th><th>Avance</th><th class="num">Total</th><th>Estado</th></tr></thead>
+    <tbody>${l.map(p => `<tr class="clic" data-pd="${esc(p.id)}"><td><b>${esc(p.folio)}</b></td><td>${esc(destinoPedido(p))}</td><td>${p.tipo === 'EXTERNO' ? 'Cliente' : 'Sucursal'}${p.solicito === 'PORTAL' ? ' · portal' : ''}</td>
+      <td>${fechaCorta(p.fecha_entrega)}</td><td>${avancePedido(p)}%</td><td class="num">${dinero(p.total)}</td><td>${chipPed(p.estado)}</td></tr>`).join('')}</tbody></table></div>`
+    : '<p class="vacio">Sin pedidos.</p>'}`;
+  const qi = $('#pd-q', c);
+  qi.oninput = () => { PD.q = qi.value; const pos = qi.selectionStart; pintarListaPedidos(c); const n = $('#pd-q', c); n.focus(); n.setSelectionRange(pos, pos); };
+}
+
+function dlgEditorPedido(base) {
+  const nuevo = !base;
+  const esSuc = rol() === 'ADMIN_SUCURSAL';
+  const bodegas = S.catalogo.almacenes.filter(a => esActivo(a.activo) && a.tipo === 'BODEGA').sort(porNombre);
+  const origenes = rol() === 'INVENTARIOS' ? S.catalogo.almacenes.filter(a => a.id === S.usuario.almacen_id) : bodegas;
+  const sucursales = S.catalogo.almacenes.filter(a => esActivo(a.activo) && a.tipo === 'SUCURSAL').sort(porNombre);
+  const p = base ? JSON.parse(JSON.stringify(base)) : {
+    tipo: esSuc ? 'INTERNO' : 'EXTERNO', origen_id: (origenes[0] || {}).id || '', cliente_id: '', destino_id: esSuc ? S.usuario.almacen_id : '',
+    condicion: 'CONTADO', iva_tasa: 0, fecha_entrega: hoyLocal(1), notas: '', lineas: []
+  };
+  const lineas = p.lineas.map(l => ({ producto_id: l.producto_id, cantidad: Number(l.cantidad), precio: Number(l.precio) }));
+  const clientes = (S.clientes || []).filter(c => c.activo !== false).sort(porNombre);
+  const d = abrirModal(nuevo ? (esSuc ? 'Solicitar mercancía a bodega' : 'Nuevo pedido') : `Editar ${p.folio}`, `
+    <form id="fped" class="form" autocomplete="off">
+      ${esSuc ? `<p class="nota">La solicitud llega a la bodega para que la programe y la surta a ${esc((S.idx.alm[S.usuario.almacen_id] || {}).nombre || 'tu sucursal')}.</p>` : `
+      <div class="segmentos" id="fp-tipo"><button type="button" data-tipo="EXTERNO">Cliente externo</button><button type="button" data-tipo="INTERNO">Sucursal</button></div>`}
+      <div class="fila3">
+        ${esSuc ? '' : `<label id="fp-cli">Cliente<select name="cliente_id"><option value="">Elige…</option>${clientes.map(c => `<option value="${esc(c.id)}" ${c.id === p.cliente_id ? 'selected' : ''}>${esc(c.nombre)}</option>`).join('')}</select></label>
+        <label id="fp-suc">Sucursal que recibe<select name="destino_id"><option value="">Elige…</option>${sucursales.map(a => `<option value="${esc(a.id)}" ${a.id === p.destino_id ? 'selected' : ''}>${esc(a.nombre)}</option>`).join('')}</select></label>`}
+        <label>Surte<select name="origen_id">${origenes.map(a => `<option value="${esc(a.id)}" ${a.id === p.origen_id ? 'selected' : ''}>${esc(a.nombre)}</option>`).join('')}</select></label>
+        <label>${esSuc ? 'Fecha deseada' : 'Fecha de surtido y entrega'}<input name="fecha_entrega" type="date" value="${esc(p.fecha_entrega || '')}"></label>
+      </div>
+      <div class="fila2" id="fp-cond"><label>Condición<select name="condicion"><option value="CONTADO">Contado</option><option value="CREDITO" ${p.condicion === 'CREDITO' ? 'selected' : ''}>Crédito</option></select></label>
+        <label>IVA<select name="iva_tasa">${[0, 8, 16].map(t => `<option value="${t}" ${Number(p.iva_tasa) === t ? 'selected' : ''}>${t}%</option>`).join('')}</select></label></div>
+      <p class="nota" id="fp-credito"></p>
+      <div class="campo"><span>Agregar producto</span><div id="fp-sel"></div></div>
+      <div id="fp-lineas"></div>
+      <label>Notas<input name="notas" value="${esc(p.notas || '')}"></label>
+      <div class="totales" id="fp-tot"></div>
+      <p class="msg" id="fp-msg"></p>
+      <div class="pie"><button type="button" class="btn sec" data-cerrar>Cancelar</button><button class="btn" type="submit">${esSuc ? 'Enviar solicitud' : 'Guardar pedido'}</button></div>
+    </form>`, true);
+  const f = $('#fped', d), msg = $('#fp-msg', d);
+  const cliente = () => (p.tipo === 'EXTERNO' && f.cliente_id ? clientePorId(f.cliente_id.value) : null);
+  const precioDe = prod => (p.tipo === 'INTERNO' ? Number(prod.costo) || 0 : precioCliente(prod, cliente()));
+  const pintarTipo = () => {
+    if (esSuc) { $('#fp-cond', d).hidden = true; return; }
+    $$('#fp-tipo button', d).forEach(b => b.classList.toggle('activo', b.dataset.tipo === p.tipo));
+    $('#fp-cli', d).hidden = p.tipo !== 'EXTERNO';
+    $('#fp-suc', d).hidden = p.tipo !== 'INTERNO';
+    $('#fp-cond', d).hidden = p.tipo !== 'EXTERNO';
+  };
+  const pintarCredito = () => {
+    const c = cliente();
+    $('#fp-credito', d).innerHTML = c ? (c.credito ? `Crédito: límite ${dinero(c.limite_credito)} · saldo ${dinero(c.saldo)} · disponible <b>${dinero(creditoDisponible(c))}</b>${Number(c.vencido) > 0 ? ' · <span class="txt-error">saldo vencido ' + dinero(c.vencido) + '</span>' : ''}`
+      : 'Este cliente no tiene crédito: el pedido será de contado.') : '';
+    if (c && !c.credito) f.condicion.value = 'CONTADO';
+  };
+  const pintarLineas = () => {
+    const ex = mapaExistencias();
+    $('#fp-lineas', d).innerHTML = lineas.length ? `<div class="tabla-cont"><table class="tabla lineas-oc"><thead><tr><th>Producto</th><th class="num">En ${esc((S.idx.alm[f.origen_id.value] || {}).nombre || 'bodega')}</th><th class="num">Cantidad</th><th class="num">Precio</th><th class="num">Importe</th><th></th></tr></thead>
+      <tbody>${lineas.map((l, i) => { const pr = S.idx.prod[l.producto_id] || {}; const e = ex[f.origen_id.value + '|' + l.producto_id] || 0;
+        return `<tr><td>${esc(pr.nombre || '—')}<small>${esc(pr.codigo || '')} · ${esc(pr.unidad || '')}</small></td><td class="num ${e < l.cantidad ? 'txt-error' : ''}">${numero(e)}</td>
+          <td class="num"><input type="number" min="0" step="any" data-i="${i}" data-k="cantidad" value="${l.cantidad}"></td>
+          <td class="num">${esBodegaRol() && p.tipo === 'EXTERNO' ? `<input type="number" min="0" step="0.01" data-i="${i}" data-k="precio" value="${l.precio}">` : dinero(l.precio)}</td>
+          <td class="num">${dinero(l.cantidad * l.precio)}</td><td><button type="button" class="btn mini peligro" data-quitar="${i}">✕</button></td></tr>`; }).join('')}</tbody></table></div>`
+      : '<p class="nota">Agrega los productos del pedido.</p>';
+    pintarTot();
+  };
+  const pintarTot = () => {
+    const sub = lineas.reduce((s, l) => s + l.cantidad * l.precio, 0);
+    const tasa = p.tipo === 'EXTERNO' ? Number(f.iva_tasa.value) || 0 : 0;
+    const iva = Math.round(sub * tasa) / 100;
+    $('#fp-tot', d).innerHTML = `<span>Subtotal${p.tipo === 'INTERNO' ? ' (a costo)' : ''}</span><span>${dinero(sub)}</span>${tasa ? `<span>IVA ${tasa}%</span><span>${dinero(iva)}</span>` : ''}<span class="g">Total</span><span class="g">${dinero(sub + iva)}</span>`;
+  };
+  const repreciar = () => { lineas.forEach(l => { const pr = S.idx.prod[l.producto_id]; if (pr) l.precio = precioDe(pr); }); pintarLineas(); };
+  pintarTipo(); pintarCredito(); pintarLineas();
+  const sel = selectorProducto($('#fp-sel', d), pr => {
+    if (!pr) return;
+    const ya = lineas.find(l => l.producto_id === pr.id);
+    if (ya) ya.cantidad += 1; else lineas.push({ producto_id: pr.id, cantidad: 1, precio: precioDe(pr) });
+    sel.limpiar();
+    pintarLineas();
+    const inp = d.querySelector(`[data-i="${lineas.findIndex(l => l.producto_id === pr.id)}"][data-k="cantidad"]`);
+    if (inp) { inp.focus(); inp.select(); }
+  });
+  if (!esSuc) {
+    $('#fp-tipo', d).onclick = e => { const b = e.target.closest('[data-tipo]'); if (b) { p.tipo = b.dataset.tipo; pintarTipo(); repreciar(); } };
+    f.cliente_id.onchange = () => { pintarCredito(); repreciar(); };
+  }
+  f.origen_id.onchange = pintarLineas;
+  f.iva_tasa.onchange = pintarTot;
+  $('#fp-lineas', d).oninput = e => {
+    const i = e.target.dataset.i;
+    if (i === undefined) return;
+    lineas[i][e.target.dataset.k] = Number(e.target.value) || 0;
+    e.target.closest('tr').cells[4].textContent = dinero(lineas[i].cantidad * lineas[i].precio);
+    pintarTot();
+  };
+  $('#fp-lineas', d).onclick = e => { const q = e.target.closest('[data-quitar]'); if (q) { lineas.splice(Number(q.dataset.quitar), 1); pintarLineas(); } };
+  f.onsubmit = async ev => {
+    ev.preventDefault();
+    if (!navigator.onLine) { msg.textContent = 'Necesitas conexión para guardar pedidos.'; return; }
+    const ls = lineas.filter(l => l.cantidad > 0);
+    if (!ls.length) { msg.textContent = 'Agrega al menos un producto.'; return; }
+    if (p.tipo === 'EXTERNO' && !esSuc && !f.cliente_id.value) { msg.textContent = 'Elige el cliente.'; return; }
+    if (p.tipo === 'INTERNO' && !esSuc && !f.destino_id.value) { msg.textContent = 'Elige la sucursal.'; return; }
+    if (nuevo && !p.id) p.id = uuid();
+    try {
+      const r = await conCarga('Guardando pedido…', () => api('guardarPedido', { pedido: {
+        nuevo, id: p.id, tipo: p.tipo, origen_id: f.origen_id.value, cliente_id: f.cliente_id ? f.cliente_id.value : '', destino_id: f.destino_id ? f.destino_id.value : '',
+        condicion: f.condicion.value, iva_tasa: f.iva_tasa.value, fecha_entrega: f.fecha_entrega.value, notas: f.notas.value.trim(), lineas: ls
+      } }));
+      cerrarModal();
+      toast(`Pedido ${r.pedido.folio} guardado.`, 'ok');
+      if (r.aviso) toast('Atención: ' + r.aviso, 'aviso');
+      if (PD.datos) actualizarPedidoLocal(r.pedido);
+      dlgPedido(r.pedido);
+    } catch (e) { msg.textContent = e.message; }
+  };
+}
+
+function dlgPedido(p) {
+  if (!p) return;
+  const bodega = esBodegaRol();
+  const enRuta = p.envios.filter(e => e.estado === 'EN_RUTA');
+  const hayPend = p.lineas.some(l => porSurtirLinea(l) > 0);
+  const tieneEnvios = p.envios.some(e => e.estado !== 'CANCELADO');
+  const acciones = [];
+  if (bodega && ['SOLICITADO', 'PROGRAMADO', 'EN_PROCESO'].includes(p.estado)) acciones.push(['programar', p.estado === 'SOLICITADO' ? 'Aceptar y programar' : 'Reprogramar', 'sec']);
+  if (bodega && ['SOLICITADO', 'PROGRAMADO', 'EN_PROCESO'].includes(p.estado) && hayPend) acciones.push(['surtir', 'Lotear / surtir', '']);
+  if (['SOLICITADO', 'PROGRAMADO'].includes(p.estado) && !tieneEnvios && (bodega || p.estado === 'SOLICITADO')) acciones.push(['editar', 'Editar', 'sec']);
+  if (bodega && p.estado === 'EN_PROCESO' && !enRuta.length) acciones.push(['cerrar', 'Cerrar con faltante', 'sec']);
+  if (['SOLICITADO', 'PROGRAMADO'].includes(p.estado) && !tieneEnvios && (bodega || p.estado === 'SOLICITADO')) acciones.push(['cancelar', 'Cancelar pedido', 'peligro']);
+  const cli = p.tipo === 'EXTERNO' ? clientePorId(p.cliente_id) : null;
+  const d = abrirModal(`Pedido ${p.folio}`, `<div class="form">
+    <div class="titulo"><span>${chipPed(p.estado)} <span class="nota">${p.tipo === 'EXTERNO' ? 'Cliente externo' : 'Traspaso a sucursal'} · ${p.solicito === 'PORTAL' ? 'pedido desde el portal' : p.solicito === 'SUCURSAL' ? 'solicitado por la sucursal' : 'capturado en bodega'}</span></span><b>${dinero(p.total)}</b></div>
+    <div class="info-oc">
+      <div><h4>Para</h4><b>${esc(destinoPedido(p))}</b>${cli && cli.telefono ? '<br>' + esc(cli.telefono) : ''}${p.tipo === 'EXTERNO' ? `<br>${p.condicion === 'CREDITO' ? 'Crédito' : 'Contado'}${Number(p.iva_tasa) ? ' · IVA ' + p.iva_tasa + '%' : ''}` : ''}</div>
+      <div><h4>Surte</h4><b>${esc((S.idx.alm[p.origen_id] || {}).nombre || '')}</b><br>Entrega: ${fechaCorta(p.fecha_entrega)}</div>
+      <div><h4>Avance</h4>${avancePedido(p)}% entregado<br>Pedido: ${fechaHora(p.fecha)}${p.cerrado ? '<br>Terminado: ' + fechaHora(p.cerrado) : ''}</div>
+    </div>
+    <div class="tabla-cont"><table class="tabla"><thead><tr><th>Producto</th><th class="num">Pedido</th><th class="num">En ruta</th><th class="num">Entregado</th><th class="num">Pendiente</th><th class="num">Precio</th><th class="num">Importe</th></tr></thead>
+      <tbody>${p.lineas.map(l => { const pr = S.idx.prod[l.producto_id] || {}; const ruta = Math.max(0, Number(l.surtido) - Number(l.entregado));
+        return `<tr><td>${esc(pr.nombre || '—')}<small>${esc(pr.unidad || '')}</small></td><td class="num">${numero(l.cantidad)}</td><td class="num">${ruta ? numero(ruta) : '—'}</td>
+          <td class="num">${numero(l.entregado)}</td><td class="num ${pendienteLinea(l) > 0 && p.estado !== 'CANCELADO' ? 'txt-error' : ''}">${numero(pendienteLinea(l))}</td>
+          <td class="num">${dinero(l.precio)}</td><td class="num">${dinero(l.cantidad * l.precio)}</td></tr>`; }).join('')}</tbody></table></div>
+    ${p.notas ? `<p><b>Notas:</b> ${esc(p.notas)}</p>` : ''}
+    ${p.envios.length ? `<div><h3>Envíos</h3><ul class="lista">${p.envios.map(e => `<li><div><b>${esc(e.folio)}</b> ${chipEnv(e.estado)} · ${fechaHora(e.fecha)} · ${dinero(e.total)}
+        <small>${e.lineas.map(l => `${numero(l.cantidad)} ${esc((S.idx.prod[l.producto_id] || {}).nombre || '')}${e.estado === 'ENTREGADO' && Number(l.recibido) < Number(l.cantidad) ? ` (llegaron ${numero(l.recibido)})` : ''}`).join(' · ')}</small>
+        ${e.recibio ? `<small>Recibió: ${esc(e.recibio)} · ${fechaHora(e.entregado)}</small>` : ''}</div>
+        <span class="acciones"><button type="button" class="btn mini sec" data-rem="${esc(e.id)}">Remisión</button>
+        ${e.estado === 'EN_RUTA' && rol() !== 'CLIENTE' ? `<button type="button" class="btn mini" data-ent="${esc(e.id)}">Confirmar entrega</button>` : ''}
+        ${e.estado === 'EN_RUTA' && bodega ? `<button type="button" class="btn mini peligro" data-cenv="${esc(e.id)}">Cancelar envío</button>` : ''}</span></li>`).join('')}</ul></div>` : ''}
+    ${acciones.length && !PD.offline ? `<div class="acciones" id="pd-acc">${acciones.map(([k, t, c]) => `<button type="button" class="btn ${c}" data-a="${k}">${t}</button>`).join('')}</div>` : ''}
+  </div>`, true);
+  d.onclick = async e => {
+    const rem = e.target.closest('[data-rem]'), ent = e.target.closest('[data-ent]'), cenv = e.target.closest('[data-cenv]'), a = e.target.closest('[data-a]');
+    try {
+      if (rem) imprimirRemision(p, p.envios.find(x => x.id === rem.dataset.rem));
+      if (ent) dlgEntrega(p, p.envios.find(x => x.id === ent.dataset.ent));
+      if (cenv) {
+        const motivo = prompt('Motivo de la cancelación del envío (la mercancía regresa a la bodega):');
+        if (!motivo) return;
+        const r = await conCarga('Cancelando envío…', () => api('cancelarEnvio', { envio_id: cenv.dataset.cenv, motivo }));
+        toast('Envío cancelado; la mercancía regresó a la bodega.', 'ok');
+        actualizarPedidoLocal(r); sincronizar(); dlgPedido(r);
+      }
+      if (!a) return;
+      const k = a.dataset.a;
+      if (k === 'editar') return dlgEditorPedido(p);
+      if (k === 'surtir') return dlgSurtir(p);
+      if (k === 'programar') return dlgProgramar(p);
+      if (k === 'cancelar' || k === 'cerrar') {
+        const motivo = prompt(k === 'cancelar' ? 'Motivo de la cancelación:' : 'Motivo del cierre (lo pendiente ya no se enviará):');
+        if (!motivo) return;
+        const r = await conCarga('Actualizando…', () => api(k === 'cancelar' ? 'cancelarPedido' : 'cerrarPedido', { id: p.id, motivo }));
+        toast(k === 'cancelar' ? 'Pedido cancelado.' : 'Pedido cerrado.', 'ok');
+        actualizarPedidoLocal(r); dlgPedido(r);
+      }
+    } catch (err) { toast(err.message, 'error'); if (err.sesion) { cerrarModal(); sesionVencida(err.message); } }
+  };
+}
+
+function dlgProgramar(p) {
+  const d = abrirModal(`Programar ${p.folio}`, `<form id="fprog" class="form">
+    <label>Fecha de surtido y entrega<input name="fecha" type="date" required value="${esc(p.fecha_entrega || hoyLocal())}"></label>
+    <p class="msg" id="fprog-msg"></p>
+    <div class="pie"><button type="button" class="btn sec" data-cerrar>Cancelar</button><button class="btn" type="submit">Programar</button></div></form>`);
+  $('#fprog', d).onsubmit = async ev => {
+    ev.preventDefault();
+    try {
+      const r = await conCarga('Programando…', () => api('programarPedido', { id: p.id, fecha_entrega: ev.target.fecha.value }));
+      toast(`${r.folio} programado para el ${fechaCorta(r.fecha_entrega)}.`, 'ok');
+      actualizarPedidoLocal(r);
+      dlgPedido(r);
+    } catch (e) { $('#fprog-msg', d).textContent = e.message; }
+  };
+}
+
+function dlgSurtir(p) {
+  const envioId = uuid();
+  const ex = mapaExistencias();
+  const filas = p.lineas.filter(l => porSurtirLinea(l) > 0);
+  const credito = p.tipo === 'EXTERNO' && p.condicion === 'CREDITO';
+  const d = abrirModal(`Lotear ${p.folio}`, `<form id="fsur" class="form" autocomplete="off">
+    <p class="nota">Captura lo que se carga en este envío. Sale del inventario de ${esc((S.idx.alm[p.origen_id] || {}).nombre || 'la bodega')}; lo que no envíes queda pendiente para otro envío.</p>
+    <div class="tabla-cont"><table class="tabla lineas-oc"><thead><tr><th>Producto</th><th class="num">Por surtir</th><th class="num">Existencia</th><th class="num">Enviar</th></tr></thead>
+      <tbody>${filas.map((l, i) => { const pr = S.idx.prod[l.producto_id] || {}; const e = ex[p.origen_id + '|' + l.producto_id] || 0; const sug = Math.max(0, Math.min(porSurtirLinea(l), e));
+        return `<tr><td>${esc(pr.nombre || '—')}<small>${esc(pr.codigo || '')}</small></td><td class="num">${numero(porSurtirLinea(l))} ${esc(pr.unidad || '')}</td>
+          <td class="num ${e < porSurtirLinea(l) ? 'txt-error' : ''}">${numero(e)}</td><td class="num"><input type="number" min="0" step="any" data-i="${i}" value="${sug}"></td></tr>`; }).join('')}</tbody></table></div>
+    <label>Notas del envío (chofer, unidad, ruta)<input name="notas"></label>
+    ${credito && esGeneral() ? '<label class="chk"><input type="checkbox" name="forzar"> Autorizar aunque rebase el crédito del cliente</label>' : ''}
+    <label class="chk"><input type="checkbox" name="imprimir" checked> Imprimir remisión</label>
+    <p class="msg" id="fsur-msg"></p>
+    <div class="pie"><button type="button" class="btn sec" data-cerrar>Cancelar</button><button class="btn" type="submit">Generar envío</button></div></form>`, true);
+  const f = $('#fsur', d);
+  f.onsubmit = async ev => {
+    ev.preventDefault();
+    const lineas = filas.map((l, i) => ({ linea_id: l.id, cantidad: Number(f.querySelector(`[data-i="${i}"]`).value) || 0 })).filter(x => x.cantidad > 0);
+    if (!lineas.length) { $('#fsur-msg', d).textContent = 'Captura al menos una cantidad.'; return; }
+    try {
+      const r = await conCarga('Generando envío…', () => api('surtirPedido', { id: p.id, envio_id: envioId, lineas, notas: f.notas.value.trim(), forzar: f.forzar ? f.forzar.checked : false }));
+      const env = r.envios.find(x => x.id === envioId);
+      toast(`Envío ${env.folio} en ruta.`, 'ok');
+      actualizarPedidoLocal(r);
+      sincronizar();
+      if (f.imprimir.checked) imprimirRemision(r, env);
+      dlgPedido(r);
+    } catch (e) { $('#fsur-msg', d).textContent = e.message; }
+  };
+}
+
+function dlgEntrega(p, envio) {
+  const precio = id => (p.lineas.find(l => l.id === id) || {}).precio || 0;
+  const factor = 1 + (Number(p.iva_tasa) || 0) / 100;
+  const externo = p.tipo === 'EXTERNO';
+  const d = abrirModal(`Entrega de ${envio.folio}`, `<form id="fent" class="form" autocomplete="off">
+    <p class="nota">Captura lo que el ${externo ? 'cliente' : 'personal de la sucursal'} recibió. Lo que no se reciba regresa al inventario de la bodega y queda pendiente en el pedido.</p>
+    <div class="tabla-cont"><table class="tabla lineas-oc"><thead><tr><th>Producto</th><th class="num">Enviado</th><th class="num">Recibido</th></tr></thead>
+      <tbody>${envio.lineas.map((l, i) => `<tr><td>${esc((S.idx.prod[l.producto_id] || {}).nombre || '—')}</td><td class="num">${numero(l.cantidad)}</td>
+        <td class="num"><input type="number" min="0" step="any" max="${l.cantidad}" data-i="${i}" value="${l.cantidad}"></td></tr>`).join('')}</tbody></table></div>
+    <div class="fila2"><label>Recibió (nombre)<input name="recibio" required></label><label>Notas<input name="notas"></label></div>
+    ${externo ? `<div class="cobro-res" id="fe-total"></div>
+      ${p.condicion === 'CREDITO' ? '<p class="nota">El importe recibido se suma al crédito del cliente.</p>' : `
+      <label class="chk"><input type="checkbox" name="cobrado" checked> Se cobró al entregar</label>
+      <div class="fila2" id="fe-pago"><label>Monto cobrado<input name="monto" type="number" step="0.01" min="0"></label>
+        <label>Forma de pago<select name="metodo">${['EFECTIVO', 'TRANSFERENCIA', 'TARJETA', 'CHEQUE'].map(m => `<option value="${m}">${METODO_TXT[m]}</option>`).join('')}</select></label></div>`}` : ''}
+    <p class="msg" id="fent-msg"></p>
+    <div class="pie"><button type="button" class="btn sec" data-cerrar>Cancelar</button><button class="btn" type="submit">Confirmar entrega</button></div></form>`, true);
+  const f = $('#fent', d);
+  const recibidos = () => envio.lineas.map((l, i) => ({ envio_linea_id: l.id, recibido: Number(f.querySelector(`[data-i="${i}"]`).value) || 0, linea_id: l.linea_id, enviado: Number(l.cantidad) }));
+  const calcular = () => {
+    if (!externo) return 0;
+    const t = Math.round(recibidos().reduce((s, x) => s + x.recibido * precio(x.linea_id), 0) * factor * 100) / 100;
+    $('#fe-total', d).innerHTML = `<span>Importe recibido${factor > 1 ? ' (con IVA)' : ''}</span><b>${dinero(t)}</b>`;
+    if (f.monto && !f.monto.dataset.tocado) f.monto.value = t.toFixed(2);
+    return t;
+  };
+  calcular();
+  f.oninput = e => { if (e.target.name === 'monto') e.target.dataset.tocado = '1'; calcular(); };
+  if (f.cobrado) f.cobrado.onchange = () => { $('#fe-pago', d).hidden = !f.cobrado.checked; };
+  f.onsubmit = async ev => {
+    ev.preventDefault();
+    const rs = recibidos();
+    if (rs.some(x => x.recibido > x.enviado)) { $('#fent-msg', d).textContent = 'No se puede recibir más de lo enviado.'; return; }
+    const pago = f.cobrado && f.cobrado.checked ? { monto: Number(f.monto.value) || 0, metodo: f.metodo.value } : null;
+    try {
+      const r = await conCarga('Registrando entrega…', () => api('entregarEnvio', { envio_id: envio.id, recibio: f.recibio.value.trim(), notas: f.notas.value.trim(),
+        lineas: rs.map(x => ({ envio_linea_id: x.envio_linea_id, recibido: x.recibido })), pago }));
+      toast(r.estado === 'ENTREGADO' ? `Pedido ${r.folio} entregado completo.` : `Entrega registrada; ${r.folio} tiene pendientes.`, 'ok');
+      actualizarPedidoLocal(r);
+      sincronizar();
+      dlgPedido(r);
+    } catch (e) { $('#fent-msg', d).textContent = e.message; }
+  };
+}
+
+/* Documento tamaño carta (remisión, estado de cuenta) */
+function imprimirDocumento(titulo, cuerpo) {
+  const ifr = document.createElement('iframe');
+  ifr.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:0';
+  document.body.appendChild(ifr);
+  const doc = ifr.contentDocument;
+  doc.open();
+  doc.write(`<!doctype html><html><head><meta charset="utf-8"><title>${esc(titulo)}</title><style>
+    @page { size: letter; margin: 1.5cm; } body { font: 11px/1.45 Arial, sans-serif; color: #222; margin: 0; }
+    .cab { display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 3px solid #E0DE27; padding-bottom: 8px; margin-bottom: 12px; }
+    .cab img { width: 70px; } .cab h1 { margin: 0; color: #0172B6; font-size: 18px; } .folio { color: #E21319; font-weight: bold; font-size: 14px; }
+    .cajas { display: flex; gap: 10px; margin-bottom: 12px; } .caja { flex: 1; border: 1px solid #cfd8dc; border-radius: 6px; padding: 8px; }
+    .caja h3 { margin: 0 0 4px; font-size: 9px; color: #0172B6; text-transform: uppercase; }
+    table { width: 100%; border-collapse: collapse; } th { background: #0172B6; color: #fff; text-align: left; padding: 5px; font-size: 10px; }
+    td { padding: 5px; border-bottom: 1px solid #e3e8ea; } .n { text-align: right; } .tot td { font-weight: bold; border-top: 2px solid #0172B6; }
+    .firmas { display: flex; gap: 40px; margin-top: 60px; } .firmas div { flex: 1; border-top: 1px solid #888; text-align: center; padding-top: 4px; }
+  </style></head><body>${cuerpo}</body></html>`);
+  doc.close();
+  setTimeout(() => {
+    try { ifr.contentWindow.focus(); ifr.contentWindow.print(); } catch (e) { /* sin impresora */ }
+    setTimeout(() => ifr.remove(), 3000);
+  }, 300);
+}
+
+function imprimirRemision(p, e) {
+  if (!e) return;
+  const externo = p.tipo === 'EXTERNO';
+  const cli = externo ? clientePorId(p.cliente_id) || (S.cliente && S.cliente.id === p.cliente_id ? S.cliente : {}) : null;
+  const dest = externo ? null : S.idx.alm[p.destino_id] || {};
+  const orig = S.idx.alm[p.origen_id] || {};
+  const precio = id => (p.lineas.find(l => l.id === id) || {}).precio || 0;
+  let sub = 0;
+  const filas = e.lineas.map(l => {
+    const pr = S.idx.prod[l.producto_id] || {};
+    const imp = Number(l.cantidad) * precio(l.linea_id);
+    sub += imp;
+    return `<tr><td>${esc(pr.codigo || '')}</td><td>${esc(pr.nombre || '')}</td><td>${esc(pr.unidad || '')}</td><td class="n">${numero(l.cantidad)}</td>
+      ${e.estado === 'ENTREGADO' ? `<td class="n">${numero(l.recibido)}</td>` : '<td class="n">&nbsp;</td>'}${externo ? `<td class="n">${dinero(precio(l.linea_id))}</td><td class="n">${dinero(imp)}</td>` : ''}</tr>`;
+  }).join('');
+  const iva = Math.round(sub * (Number(p.iva_tasa) || 0)) / 100;
+  imprimirDocumento(`Remisión ${e.folio}`, `
+    <div class="cab"><div style="display:flex;gap:10px;align-items:center"><img src="icons/icon-192.png" alt=""><div><h1>${esc(CFG.NOMBRE)}</h1>${esc(orig.nombre || '')}${orig.direccion ? '<br>' + esc(orig.direccion) : ''}</div></div>
+      <div style="text-align:right"><h1>REMISIÓN</h1><div class="folio">${esc(e.folio)}</div>Pedido ${esc(p.folio)}<br>${fechaHora(e.fecha)}</div></div>
+    <div class="cajas"><div class="caja"><h3>${externo ? 'Cliente' : 'Sucursal'}</h3><b>${esc(externo ? cli.nombre || '' : dest.nombre || '')}</b><br>
+      ${esc(externo ? cli.direccion || '' : dest.direccion || '')}${(externo ? cli.telefono : dest.telefono) ? '<br>Tel. ' + esc(externo ? cli.telefono : dest.telefono) : ''}${externo && cli.rfc ? '<br>RFC ' + esc(cli.rfc) : ''}</div>
+      <div class="caja"><h3>Entrega</h3>Fecha programada: ${fechaCorta(p.fecha_entrega)}<br>${externo ? (p.condicion === 'CREDITO' ? 'Condición: crédito' : 'Condición: contado') : 'Traspaso entre almacenes'}${e.notas ? '<br>' + esc(e.notas) : ''}</div></div>
+    <table><thead><tr><th>Código</th><th>Producto</th><th>Unidad</th><th class="n">Enviado</th><th class="n">Recibido</th>${externo ? '<th class="n">Precio</th><th class="n">Importe</th>' : ''}</tr></thead>
+      <tbody>${filas}${externo ? `<tr class="tot"><td colspan="6" class="n">Subtotal</td><td class="n">${dinero(sub)}</td></tr>${iva ? `<tr><td colspan="6" class="n">IVA ${p.iva_tasa}%</td><td class="n">${dinero(iva)}</td></tr>` : ''}
+        <tr class="tot"><td colspan="6" class="n">Total</td><td class="n">${dinero(sub + iva)}</td></tr>` : ''}</tbody></table>
+    ${e.recibio ? `<p>Recibió: <b>${esc(e.recibio)}</b> · ${fechaHora(e.entregado)}</p>` : ''}
+    <div class="firmas"><div>Entregó (nombre y firma)</div><div>Recibió (nombre y firma)</div></div>`);
+}
+
+/* ---------- Portal del cliente ---------- */
+const PT = { datos: null, carrito: null, cat: '', q: '' };
+
+async function cargarPortal(c) {
+  if (!navigator.onLine) { if (c) c.innerHTML = '<p class="aviso-offline">El portal necesita conexión a internet.</p>'; return null; }
+  try {
+    PT.datos = await conCarga('Cargando…', () => api('portal'));
+    S.cliente = PT.datos.cliente;
+    return PT.datos;
+  } catch (e) {
+    if (c) c.innerHTML = `<p class="txt-error">${esc(e.message)}</p>`;
+    if (e.sesion) sesionVencida(e.message);
+    return null;
+  }
+}
+
+function vInicioPortal(el) {
+  const c = S.cliente || {};
+  const disp = c.credito ? creditoDisponible(c) : 0;
+  el.innerHTML = `<div class="saludo"><h2>Hola, ${esc(c.nombre || S.usuario.nombre)}</h2><p>Portal de clientes · ${esc(CFG.NOMBRE)}</p></div>
+    <div class="tarjetas">
+      <div class="tarjeta"><span>Saldo pendiente</span><b>${dinero(c.saldo)}</b></div>
+      ${c.credito ? `<div class="tarjeta"><span>Crédito disponible</span><b>${dinero(disp)}</b><small>Límite ${dinero(c.limite_credito)} · ${c.dias_credito} días</small></div>` : ''}
+      <button type="button" class="tarjeta ${Number(c.vencido) > 0 ? 'alerta-roja' : ''}" data-ir="estado"><span>Vencido</span><b>${dinero(c.vencido)}</b></button>
+    </div>
+    <div class="portal-acciones">
+      <button type="button" class="ir-caja" data-ir="tienda"><b>Hacer un pedido</b><span>Catálogo con tus precios</span></button>
+      <button type="button" class="btn sec" data-ir="mispedidos">Mis pedidos</button>
+      <button type="button" class="btn sec" data-ir="estado">Estado de cuenta</button>
+    </div>
+    ${Number(c.vencido) > 0 ? '<p class="aviso-offline">Tienes saldo vencido: los pedidos nuevos solo pueden ser de contado hasta que se regularice.</p>' : ''}`;
+  el.onclick = e => { const b = e.target.closest('[data-ir]'); if (b) irA(b.dataset.ir); };
+  S.refrescar = () => vInicioPortal(el);
+}
+
+async function vTienda(el) {
+  if (!PT.carrito) PT.carrito = (await DB.get('carrito:' + S.usuario.usuario)) || { lineas: [], condicion: '', fecha: '', notas: '' };
+  const K = PT.carrito;
+  const cli = S.cliente || {};
+  const puedeCredito = cli.credito && !(Number(cli.vencido) > 0);
+  if (!K.condicion) K.condicion = puedeCredito ? 'CREDITO' : 'CONTADO';
+  if (!puedeCredito) K.condicion = 'CONTADO';
+  el.innerHTML = `<div class="titulo"><h2>Hacer un pedido</h2></div>
+    <div class="caja">
+      <section class="caja-buscar">
+        <input id="pt-q" type="search" placeholder="Busca por nombre o código" value="${esc(PT.q)}" autocomplete="off">
+        <div class="cats" id="pt-cats"></div><div class="cj-res" id="pt-res"></div>
+      </section>
+      <aside class="caja-ticket">
+        <b>Tu pedido</b>
+        <div class="cj-lineas" id="pt-lineas"></div>
+        <div class="cj-total" id="pt-total"></div>
+        <label>Pago<select id="pt-cond"><option value="CONTADO">Contado</option>${puedeCredito ? `<option value="CREDITO" ${K.condicion === 'CREDITO' ? 'selected' : ''}>Crédito (disponible ${dinero(creditoDisponible(cli))})</option>` : ''}</select></label>
+        <label>Fecha deseada de entrega<input id="pt-fecha" type="date" min="${hoyLocal()}" value="${esc(K.fecha)}"></label>
+        <label>Notas<input id="pt-notas" value="${esc(K.notas)}" placeholder="Horario, dirección de entrega…"></label>
+        <p class="msg" id="pt-msg"></p>
+        <button type="button" class="btn cobrar" id="pt-enviar">Enviar pedido</button>
+      </aside>
+    </div>
+    <div class="cj-movil"><button type="button" class="cj-ver" id="pt-ver"></button><button type="button" class="btn cobrar" id="pt-enviar2">Enviar</button></div>`;
+  const guardarCarrito = () => DB.set('carrito:' + S.usuario.usuario, K);
+  const cats = S.catalogo.categorias.slice().sort(porNombre);
+  $('#pt-cats', el).innerHTML = [['', 'Todo']].concat(cats.map(c => [c.id, c.nombre])).map(([id, n]) => `<button type="button" data-cat="${esc(id)}" class="${PT.cat === id ? 'activo' : ''}">${esc(n)}</button>`).join('');
+  const pintarRes = () => {
+    const q = normal(PT.q);
+    const l = S.catalogo.productos.filter(p => (!PT.cat || p.categoria_id === PT.cat) && (!q || coincide(p, q))).sort(porNombre).slice(0, 80);
+    $('#pt-res', el).innerHTML = l.map(p => `<button type="button" class="prod" data-p="${esc(p.id)}"><b>${esc(p.nombre)}</b>
+      <span class="fila-oc"><span class="precio">${dinero(precioCliente(p, cli))}</span><small class="${p.disponible ? 'txt-ok' : 'txt-error'}">${p.disponible ? 'Disponible' : 'Agotado'}</small></span></button>`).join('') || '<p class="nota">Sin productos.</p>';
+  };
+  const total = () => K.lineas.reduce((s, l) => { const p = S.idx.prod[l.producto_id]; return s + (p ? precioCliente(p, cli) * l.cantidad : 0); }, 0);
+  const pintarCarrito = () => {
+    K.lineas = K.lineas.filter(l => S.idx.prod[l.producto_id]);
+    ponerHTML($('#pt-lineas', el), K.lineas.length ? K.lineas.map((l, i) => {
+      const p = S.idx.prod[l.producto_id];
+      const pr = precioCliente(p, cli);
+      return `<div class="cj-linea"><div class="cj-nombre">${esc(p.nombre)}<small>${dinero(pr)} c/u</small></div>
+        <div class="cj-cant"><button type="button" data-menos="${i}">−</button><input type="number" min="0" step="any" data-cant="${i}" value="${l.cantidad}"><button type="button" data-mas="${i}">+</button></div>
+        <b class="cj-imp">${dinero(pr * l.cantidad)}</b><button type="button" class="icono" data-quitar="${i}">✕</button></div>`;
+    }).join('') : '<p class="nota cj-vacio">Toca un producto para agregarlo.</p>');
+    $('#pt-total', el).innerHTML = `<span>${plural(K.lineas.length, 'producto')}</span><b>${dinero(total())}</b>`;
+    $('#pt-ver', el).innerHTML = `<small>${plural(K.lineas.length, 'producto')} · ver pedido</small><b>${dinero(total())}</b>`;
+    $('#pt-enviar', el).disabled = $('#pt-enviar2', el).disabled = !K.lineas.length;
+    guardarCarrito();
+  };
+  pintarRes(); pintarCarrito();
+  $('#pt-q', el).oninput = e => { PT.q = e.target.value; pintarRes(); };
+  $('#pt-cats', el).onclick = e => { const b = e.target.closest('[data-cat]'); if (b) { PT.cat = b.dataset.cat; $$('#pt-cats button', el).forEach(x => x.classList.toggle('activo', x === b)); pintarRes(); } };
+  $('#pt-res', el).onclick = e => {
+    const b = e.target.closest('[data-p]');
+    if (!b) return;
+    const ya = K.lineas.find(l => l.producto_id === b.dataset.p);
+    if (ya) ya.cantidad += 1; else K.lineas.push({ producto_id: b.dataset.p, cantidad: 1 });
+    pintarCarrito();
+  };
+  const lin = $('#pt-lineas', el);
+  lin.onclick = e => {
+    const t = e.target;
+    if (t.dataset.mas !== undefined) K.lineas[t.dataset.mas].cantidad += 1;
+    else if (t.dataset.menos !== undefined) { const l = K.lineas[t.dataset.menos]; l.cantidad -= 1; if (l.cantidad <= 0) K.lineas.splice(Number(t.dataset.menos), 1); }
+    else if (t.closest('[data-quitar]')) K.lineas.splice(Number(t.closest('[data-quitar]').dataset.quitar), 1);
+    else return;
+    pintarCarrito();
+  };
+  lin.onchange = e => {
+    const i = e.target.dataset.cant;
+    if (i === undefined) return;
+    const n = Number(e.target.value);
+    if (n > 0) K.lineas[i].cantidad = n; else K.lineas.splice(Number(i), 1);
+    pintarCarrito();
+  };
+  $('#pt-cond', el).onchange = e => { K.condicion = e.target.value; guardarCarrito(); };
+  $('#pt-fecha', el).onchange = e => { K.fecha = e.target.value; guardarCarrito(); };
+  $('#pt-notas', el).oninput = e => { K.notas = e.target.value; guardarCarrito(); };
+  $('#pt-ver', el).onclick = () => $('.caja-ticket', el).scrollIntoView({ behavior: 'smooth' });
+  const enviar = async () => {
+    const msg = $('#pt-msg', el);
+    if (!navigator.onLine) { msg.textContent = 'Necesitas conexión para enviar el pedido. Tu carrito se guarda en este equipo.'; return; }
+    if (!K.id) { K.id = uuid(); guardarCarrito(); }
+    try {
+      const r = await conCarga('Enviando pedido…', () => api('guardarPedido', { pedido: { nuevo: true, id: K.id, condicion: K.condicion, fecha_entrega: K.fecha, notas: K.notas, lineas: K.lineas } }));
+      PT.carrito = { lineas: [], condicion: '', fecha: '', notas: '' };
+      await DB.set('carrito:' + S.usuario.usuario, PT.carrito);
+      toast(`¡Gracias! Recibimos tu pedido ${r.pedido.folio}. Te avisaremos cuando vaya en camino.`, 'ok');
+      PT.datos = null;
+      irA('mispedidos');
+    } catch (e) {
+      msg.textContent = e.message;
+      if (/crédito|vencido/i.test(e.message)) delete K.id;   // podrá reintentarlo de contado
+    }
+  };
+  $('#pt-enviar', el).onclick = enviar;
+  $('#pt-enviar2', el).onclick = enviar;
+  S.refrescar = () => { pintarRes(); pintarCarrito(); };
+}
+
+async function vMisPedidos(el) {
+  el.innerHTML = '<div class="titulo"><h2>Mis pedidos</h2><button type="button" class="btn" id="mp-nuevo">Hacer un pedido</button></div><div id="mp-lista"></div>';
+  $('#mp-nuevo', el).onclick = () => irA('tienda');
+  const c = $('#mp-lista', el);
+  const D = PT.datos || (await cargarPortal(c));
+  if (!D) return;
+  const l = D.pedidos.slice().sort((a, b) => String(b.folio).localeCompare(String(a.folio)));
+  c.innerHTML = l.length ? `<div class="tarjetas grandes">${l.map(p => `<button type="button" class="tarjeta" data-pd="${esc(p.id)}">
+      <span class="fila-oc"><b>${esc(p.folio)}</b>${chipPed(p.estado)}</span>
+      <small>Pedido ${fechaHora(p.fecha)}${p.fecha_entrega ? ' · entrega ' + fechaCorta(p.fecha_entrega) : ''}</small>
+      <span class="fila-oc"><small>${p.envios.filter(e => e.estado === 'EN_RUTA').length ? '<b>🚚 En camino</b>' : avancePedido(p) + '% entregado'}</small><b>${dinero(p.total)}</b></span>
+      ${['EN_PROCESO'].includes(p.estado) ? `<span class="barra-avance"><span style="width:${avancePedido(p)}%"></span></span>` : ''}
+    </button>`).join('')}</div>` : '<p class="vacio">Aún no tienes pedidos.</p>';
+  c.onclick = async e => {
+    const b = e.target.closest('[data-pd]');
+    if (!b) return;
+    const p = D.pedidos.find(x => x.id === b.dataset.pd);
+    const d = abrirModal(`Pedido ${p.folio}`, `<div class="form">
+      <div class="titulo"><span>${chipPed(p.estado)} · ${p.condicion === 'CREDITO' ? 'Crédito' : 'Contado'}</span><b>${dinero(p.total)}</b></div>
+      <div class="tabla-cont"><table class="tabla"><thead><tr><th>Producto</th><th class="num">Pedido</th><th class="num">Entregado</th><th class="num">Precio</th></tr></thead>
+        <tbody>${p.lineas.map(l => `<tr><td>${esc((S.idx.prod[l.producto_id] || {}).nombre || '—')}</td><td class="num">${numero(l.cantidad)}</td><td class="num">${numero(l.entregado)}</td><td class="num">${dinero(l.precio)}</td></tr>`).join('')}</tbody></table></div>
+      ${p.envios.filter(x => x.estado !== 'CANCELADO').length ? `<h3>Envíos</h3><ul class="lista">${p.envios.filter(x => x.estado !== 'CANCELADO').map(x => `<li><span><b>${esc(x.folio)}</b> ${chipEnv(x.estado)} · ${fechaHora(x.fecha)}${x.recibio ? ' · recibió ' + esc(x.recibio) : ''}</span>
+        <button type="button" class="btn mini sec" data-rem="${esc(x.id)}">Remisión</button></li>`).join('')}</ul>` : '<p class="nota">Tu pedido aún no sale de bodega.</p>'}
+      ${p.notas ? `<p class="nota">${esc(p.notas)}</p>` : ''}
+      ${p.estado === 'SOLICITADO' ? '<div class="acciones"><button type="button" class="btn peligro" id="mp-cancelar">Cancelar pedido</button></div>' : ''}</div>`, true);
+    d.onclick = async ev => {
+      const r = ev.target.closest('[data-rem]');
+      if (r) imprimirRemision(p, p.envios.find(x => x.id === r.dataset.rem));
+      if (ev.target.id === 'mp-cancelar' && confirm('¿Cancelar este pedido?')) {
+        try {
+          await conCarga('Cancelando…', () => api('cancelarPedido', { id: p.id, motivo: 'Cancelado por el cliente' }));
+          cerrarModal(); toast('Pedido cancelado.', 'ok'); PT.datos = null; vMisPedidos(el);
+        } catch (err) { toast(err.message, 'error'); }
+      }
+    };
+  };
+}
+
+async function vEstadoCuenta(el) {
+  el.innerHTML = '<div class="titulo"><h2>Estado de cuenta</h2><button type="button" class="btn sec" id="ec-imp">Imprimir</button></div><div id="ec-cuerpo"></div>';
+  const c = $('#ec-cuerpo', el);
+  const D = await cargarPortal(c);
+  if (!D) return;
+  const hoy = D.hoy;
+  const abiertas = D.cuentas.filter(x => Number(x.saldo) > 0.005).sort((a, b) => String(a.vence).localeCompare(String(b.vence)));
+  const cli = D.cliente;
+  const filas = D.cuentas.slice().sort((a, b) => String(b.fecha_cuenta).localeCompare(String(a.fecha_cuenta)));
+  const estado = x => (Number(x.saldo) <= 0.005 ? '<span class="est cxp-PAGADA">Pagado</span>' : String(x.vence) < hoy ? '<span class="est cxp-VENCIDA">Vencido</span>'
+    : String(x.vence) <= sumarDiasYmd(hoy, 5) ? '<span class="est cxp-POR_VENCER">Por vencer</span>' : '<span class="est cxp-PENDIENTE">Pendiente</span>');
+  const tabla = `<div class="tabla-cont"><table class="tabla"><thead><tr><th>Fecha</th><th>Documento</th><th>Vence</th><th class="num">Importe</th><th class="num">Abonado</th><th class="num">Saldo</th><th>Estado</th></tr></thead>
+    <tbody>${filas.map(x => `<tr><td>${fechaCorta(x.fecha_cuenta)}</td><td>${esc(x.folio)}</td><td>${fechaCorta(x.vence)}</td><td class="num">${dinero(x.monto)}</td>
+      <td class="num">${dinero(x.pagado)}</td><td class="num"><b>${dinero(x.saldo)}</b></td><td>${estado(x)}</td></tr>`).join('') || '<tr><td colspan="7" class="vacio">Sin movimientos.</td></tr>'}</tbody></table></div>`;
+  const abonos = D.abonos.slice().sort((a, b) => String(b.fecha_abono).localeCompare(String(a.fecha_abono)));
+  c.innerHTML = `<div class="tarjetas">
+      <div class="tarjeta"><span>Saldo total</span><b>${dinero(cli.saldo)}</b><small>${plural(abiertas.length, 'documento')}</small></div>
+      ${cli.credito ? `<div class="tarjeta"><span>Crédito disponible</span><b>${dinero(D.disponible)}</b><small>Límite ${dinero(cli.limite_credito)}</small></div>` : ''}
+      <div class="tarjeta ${cli.vencido > 0 ? 'alerta-roja' : ''}"><span>Vencido</span><b>${dinero(cli.vencido)}</b></div>
+      ${abiertas.length ? `<div class="tarjeta"><span>Próximo vencimiento</span><b>${fechaCorta(abiertas[0].vence)}</b><small>${dinero(abiertas[0].saldo)}</small></div>` : ''}
+    </div>${tabla}
+    ${abonos.length ? `<h3>Pagos recibidos</h3><div class="tabla-cont"><table class="tabla"><thead><tr><th>Fecha</th><th>Forma de pago</th><th>Referencia</th><th class="num">Monto</th></tr></thead>
+      <tbody>${abonos.map(a => `<tr><td>${fechaCorta(a.fecha_abono)}</td><td>${METODO_TXT[a.metodo] || a.metodo}</td><td>${esc(a.referencia || '')}</td><td class="num">${dinero(a.monto)}</td></tr>`).join('')}</tbody></table></div>` : ''}`;
+  $('#ec-imp', el).onclick = () => imprimirDocumento('Estado de cuenta', `
+    <div class="cab"><div style="display:flex;gap:10px;align-items:center"><img src="icons/icon-192.png" alt=""><h1>${esc(CFG.NOMBRE)}</h1></div>
+      <div style="text-align:right"><h1>ESTADO DE CUENTA</h1>${fechaCorta(hoy)}</div></div>
+    <div class="cajas"><div class="caja"><h3>Cliente</h3><b>${esc(cli.nombre)}</b>${cli.rfc ? '<br>RFC ' + esc(cli.rfc) : ''}</div>
+      <div class="caja"><h3>Resumen</h3>Saldo: <b>${dinero(cli.saldo)}</b><br>Vencido: ${dinero(cli.vencido)}${cli.credito ? '<br>Crédito disponible: ' + dinero(D.disponible) : ''}</div></div>
+    <table><thead><tr><th>Fecha</th><th>Documento</th><th>Vence</th><th class="n">Importe</th><th class="n">Abonado</th><th class="n">Saldo</th></tr></thead>
+      <tbody>${filas.map(x => `<tr><td>${fechaCorta(x.fecha_cuenta)}</td><td>${esc(x.folio)}</td><td>${fechaCorta(x.vence)}</td><td class="n">${dinero(x.monto)}</td><td class="n">${dinero(x.pagado)}</td><td class="n">${dinero(x.saldo)}</td></tr>`).join('')}
+      <tr class="tot"><td colspan="5" class="n">Saldo total</td><td class="n">${dinero(cli.saldo)}</td></tr></tbody></table>`);
+}
+
 /* ---- Almacenes ---- */
 function vAlmacenes(el) {
   el.innerHTML = `<div class="titulo"><h2>Almacenes y sucursales</h2><div class="acciones"><button type="button" class="btn" id="btn-nuevo">Nuevo almacén</button></div></div><div id="lista" class="tarjetas grandes"></div>`;
@@ -3311,6 +3972,7 @@ function dlgUsuario(u, alGuardar) {
       <div class="fila2">
         <label>Rol<select name="rol">${roles.map(r => `<option value="${r}" ${r === u.rol ? 'selected' : ''}>${ROL_TXT[r]}</option>`).join('')}</select></label>
         <label id="lbl-alm">Almacén / sucursal<select name="almacen_id"><option value="">Elige…</option>${alms.map(a => `<option value="${esc(a.id)}" ${a.id === u.almacen_id ? 'selected' : ''}>${esc(a.nombre)}</option>`).join('')}</select></label>
+        <label id="lbl-cli">Cliente (acceso al portal)<select name="cliente_id"><option value="">Elige…</option>${(S.clientes || []).slice().sort(porNombre).map(c => `<option value="${esc(c.id)}" ${c.id === u.cliente_id ? 'selected' : ''}>${esc(c.nombre)}</option>`).join('')}</select></label>
       </div>
       <label>${nuevo ? 'Contraseña inicial' : 'Nueva contraseña (déjala vacía para no cambiarla)'}<input name="password" type="text" ${nuevo ? 'required' : ''} minlength="6" autocomplete="new-password"></label>
       <p class="nota">Al entrar por primera vez se le pedirá cambiarla.</p>
@@ -3319,7 +3981,10 @@ function dlgUsuario(u, alGuardar) {
       <div class="pie"><button type="button" class="btn sec" data-cerrar>Cancelar</button><button class="btn" type="submit">Guardar</button></div>
     </form>`);
   const f = $('#fu', d);
-  const pintarAlm = () => { $('#lbl-alm', d).hidden = ['ADMIN_GENERAL', 'CLIENTE'].includes(f.rol.value); };
+  const pintarAlm = () => {
+    $('#lbl-alm', d).hidden = ['ADMIN_GENERAL', 'CLIENTE'].includes(f.rol.value);
+    $('#lbl-cli', d).hidden = f.rol.value !== 'CLIENTE';
+  };
   pintarAlm();
   f.rol.onchange = pintarAlm;
   f.onsubmit = async ev => {
@@ -3330,7 +3995,7 @@ function dlgUsuario(u, alGuardar) {
     try {
       await api('guardarUsuario', { usuario: {
         id: u.id || '', usuario: f.usuario.value.trim(), nombre: f.nombre.value.trim(), rol: f.rol.value,
-        almacen_id: f.almacen_id.value, password: f.password.value, activo: nuevo ? true : f.activo.checked
+        almacen_id: f.almacen_id.value, cliente_id: f.cliente_id.value, password: f.password.value, activo: nuevo ? true : f.activo.checked
       } });
       cerrarModal();
       toast('Usuario guardado.', 'ok');
