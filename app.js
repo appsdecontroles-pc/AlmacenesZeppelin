@@ -5,7 +5,7 @@
 
 const CFG = Object.assign({ NOMBRE: 'Control de Inventario', SYNC_MINUTOS: 15, API_URL: '' }, window.APP_CONFIG || {});
 CFG.NOMBRE_ORIGINAL = CFG.NOMBRE;
-const VERSION_APP = '5.4.1';
+const VERSION_APP = '5.5.0';
 
 const ROL_TXT = {
   ADMIN_GENERAL: 'Administrador general',
@@ -280,6 +280,10 @@ async function cargarSesion(ses) {
   S.clientes = (await DB.get('clientes')) || [];
   S.precios = (await DB.get('precios')) || [];
   S.otras = (await DB.get('otras')) || null;
+  S.cajaAnterior = (await DB.get('cajaAnterior')) || {};
+  const cj = (await DB.get('cajas')) || {};
+  S.cajas = cj.lista || [];
+  S.cajasAbiertas = cj.abiertas || {};
   S.cliente = rol() === 'CLIENTE' ? (await DB.get('cliente')) || null : null;
   S.avisos = (await DB.get('avisos')) || null;
   indexar();
@@ -420,6 +424,8 @@ async function sincronizar(manual = false) {
     await DB.set('existencias', S.existencias);
     S.otras = d.otras || null;
     await DB.set('otras', S.otras);
+    if (d.cajaAnterior) { S.cajaAnterior = d.cajaAnterior; await DB.set('cajaAnterior', S.cajaAnterior); }
+    if (d.cajas) { S.cajas = d.cajas; S.cajasAbiertas = d.cajasAbiertas || {}; await DB.set('cajas', { lista: S.cajas, abiertas: S.cajasAbiertas }); }
     S.alertas = d.alertas || null;
     await DB.set('alertas', S.alertas);
     S.avisos = d.avisos || null;
@@ -588,7 +594,9 @@ function vInicio(el) {
 function vProductos(el) {
   const puede = puedeCatalogo();
   const borra = esGeneral();
+  const veVentas = ['ADMIN_GENERAL', 'ADMIN_SUCURSAL', 'INVENTARIOS'].includes(rol());
   F.psel = F.psel || new Set();
+  F.pper = F.pper || '7';
   const cats = S.catalogo.categorias.filter(c => esActivo(c.activo)).sort(porNombre);
   el.innerHTML = `
     <div class="titulo"><h2>Productos</h2>${puede ? `<div class="acciones"><button type="button" class="btn sec" id="btn-cats">Categorías</button><button type="button" class="btn sec" id="btn-importar">Importar Excel</button><button type="button" class="btn" id="btn-nuevo">Nuevo producto</button></div>` : ''}</div>
@@ -596,7 +604,10 @@ function vProductos(el) {
       <input id="f-q" type="search" placeholder="Buscar por nombre, código o escanea el código de barras" value="${esc(F.pq || '')}" autocomplete="off">
       <select id="f-cat"><option value="">Todas las categorías</option>${cats.map(c => `<option value="${esc(c.id)}" ${F.pcat === c.id ? 'selected' : ''}>${esc(c.nombre)}</option>`).join('')}</select>
       <label class="chk"><input type="checkbox" id="f-inact" ${F.pinact ? 'checked' : ''}> Ver inactivos</label>
+      ${veVentas ? `<select id="f-orden"><option value="">Ordenar por nombre</option><option value="cantidad">Más vendidos (piezas)</option><option value="importe">Más vendidos (importe)</option></select>
+      <select id="f-per" ${F.porden ? '' : 'hidden'}>${Object.entries(PERIODOS).map(([k, [t]]) => `<option value="${k}">${t}</option>`).join('')}</select>` : ''}
     </div>
+    <p class="nota" id="p-mv" hidden></p>
     ${borra ? '<div class="barra-sel" id="p-sel" hidden></div>' : ''}
     <div id="lista"></div>`;
 
@@ -624,27 +635,37 @@ function vProductos(el) {
     const q = normal(F.pq || '');
     const ex = mapaExistencias();
     const alms = almacenesVisibles();
+    // Ventas del periodo (si se ordena por más vendidos)
+    const mv = F.porden ? MV[F.pper] : null;
+    const vend = id => (mv && mv.mapa[id]) || { cantidad: 0, importe: 0 };
     let lista = S.catalogo.productos
       .filter(p => (F.pinact || esActivo(p.activo)) && (!F.pcat || p.categoria_id === F.pcat) && (!q || coincide(p, q)))
-      .sort(porNombre);
+      .sort(mv ? (a, b) => (vend(b.id)[F.porden] - vend(a.id)[F.porden]) || porNombre(a, b) : porNombre);
     filtrados = lista;
+    const pmv = $('#p-mv', el);
+    if (pmv) {
+      pmv.hidden = !mv;
+      if (mv) pmv.innerHTML = `Ventas del <b>${fechaCorta(mv.desde)}</b> al <b>${fechaCorta(mv.hasta)}</b>${esGeneral() ? ' en todas las sucursales' : ''}: ${numero(mv.piezas)} piezas · ${dinero(mv.importe)}. Sin contar ventas canceladas.`;
+    }
     const total = lista.length;
     lista = lista.slice(0, 300);
     $('#lista', el).innerHTML = total ? `
       <div class="tabla-cont"><table class="tabla">
-        <thead><tr>${borra ? '<th class="col-sel"><input type="checkbox" id="ps-pag" title="Seleccionar los de esta página"></th>' : ''}<th>Código</th><th>Producto</th><th>Categoría</th>${veCostos() ? '<th class="num">Costo</th>' : ''}<th class="num">Menudeo</th><th class="num">Mayoreo</th><th class="num">Existencia</th></tr></thead>
-        <tbody>${lista.map(p => {
+        <thead><tr>${borra ? '<th class="col-sel"><input type="checkbox" id="ps-pag" title="Seleccionar los de esta página"></th>' : ''}${mv ? '<th class="num">#</th>' : ''}<th>Código</th><th>Producto</th><th>Categoría</th>${veCostos() ? '<th class="num">Costo</th>' : ''}<th class="num">Menudeo</th><th class="num">Mayoreo</th><th class="num">Existencia</th>${mv ? '<th class="num">Vendido</th><th class="num">Importe</th>' : ''}</tr></thead>
+        <tbody>${lista.map((p, ip) => {
           const c = alms.reduce((s, a) => s + (ex[a.id + '|' + p.id] || 0), 0);
           const bajo = Number(p.stock_minimo) > 0 && c < Number(p.stock_minimo);
           return `<tr data-id="${esc(p.id)}" class="clic ${esActivo(p.activo) ? '' : 'inactivo'} ${F.psel.has(p.id) ? 'sel' : ''}">
             ${borra ? `<td class="col-sel"><input type="checkbox" data-sel="${esc(p.id)}" ${F.psel.has(p.id) ? 'checked' : ''}></td>` : ''}
+            ${mv ? `<td class="num rank">${vend(p.id).cantidad > 0 ? ip + 1 : ''}</td>` : ''}
             <td>${esc(p.codigo)}${p.codigo_barras ? `<small>${esc(p.codigo_barras)}</small>` : ''}</td>
             <td>${esc(p.nombre)}</td>
             <td>${esc(S.idx.cat[p.categoria_id] ? S.idx.cat[p.categoria_id].nombre : '—')}</td>
             ${veCostos() ? `<td class="num">${dinero(p.costo)}</td>` : ''}
             <td class="num">${dinero(p.precio_menudeo)}</td>
             <td class="num">${dinero(p.precio_mayoreo)}</td>
-            <td class="num ${bajo ? 'txt-error' : ''}">${numero(c)} ${esc(p.unidad || '')}</td></tr>`;
+            <td class="num ${bajo ? 'txt-error' : ''}">${numero(c)} ${esc(p.unidad || '')}</td>
+            ${mv ? `<td class="num"><b>${numero(vend(p.id).cantidad)}</b></td><td class="num">${dinero(vend(p.id).importe)}</td>` : ''}</tr>`;
         }).join('')}</tbody></table></div>
       ${total > 300 ? `<p class="nota">Mostrando 300 de ${total}. Afina la búsqueda.</p>` : ''}`
       : `<p class="vacio">${S.catalogo.productos.length ? 'Sin resultados.' : 'Aún no hay productos registrados.'}</p>`;
@@ -676,6 +697,30 @@ function vProductos(el) {
   };
   $('#f-cat', el).onchange = e => { F.pcat = e.target.value; pintar(); };
   $('#f-inact', el).onchange = e => { F.pinact = e.target.checked; pintar(); };
+  if (veVentas) {
+    const fo = $('#f-orden', el), fp = $('#f-per', el);
+    fo.value = F.porden || '';
+    fp.value = F.pper;
+    const aplicar = async () => {
+      F.porden = fo.value; F.pper = fp.value;
+      fp.hidden = !F.porden;
+      if (F.porden && !MV[F.pper]) {
+        if (!navigator.onLine) { toast('Necesitas conexión para consultar las ventas.', 'error'); fo.value = F.porden = ''; fp.hidden = true; return; }
+        const [desde, hasta] = PERIODOS[F.pper][1]();
+        try {
+          const r = await conCarga('Consultando ventas…', () => api('masVendidos', { desde, hasta }));
+          const mapa = {};
+          r.productos.forEach(x => { mapa[x.producto_id] = x; });
+          MV[F.pper] = { desde: r.desde, hasta: r.hasta, mapa, piezas: r.productos.reduce((t, x) => t + x.cantidad, 0), importe: r.productos.reduce((t, x) => t + x.importe, 0) };
+          setTimeout(() => { delete MV[F.pper]; }, 5 * 60000);   // se vuelve a consultar después de 5 minutos
+        } catch (e) { toast(e.message, 'error'); fo.value = F.porden = ''; fp.hidden = true; return; }
+      }
+      pintar();
+    };
+    fo.onchange = aplicar;
+    fp.onchange = aplicar;
+    if (F.porden) aplicar();
+  }
   $('#lista', el).onclick = e => {
     if (e.target.closest('.col-sel')) {
       const c = e.target.closest('.col-sel').querySelector('input');
@@ -698,6 +743,17 @@ function vProductos(el) {
   }
   if (!F.pq) q.focus();
 }
+
+// Periodos para "más vendidos": [texto, () => [desde, hasta]]
+const MV = {};
+const PERIODOS = {
+  '7': ['Últimos 7 días', () => [hoyLocal(-6), hoyLocal()]],
+  semana: ['Esta semana', () => { const d = new Date().getDay() || 7; return [hoyLocal(1 - d), hoyLocal()]; }],
+  mes: ['Este mes', () => [hoyLocal().slice(0, 8) + '01', hoyLocal()]],
+  '30': ['Últimos 30 días', () => [hoyLocal(-29), hoyLocal()]],
+  mespas: ['Mes pasado', () => { const h = new Date(); const ini = new Date(h.getFullYear(), h.getMonth() - 1, 1), fin = new Date(h.getFullYear(), h.getMonth(), 0);
+    const f = x => `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, '0')}-${String(x.getDate()).padStart(2, '0')}`; return [f(ini), f(fin)]; }]
+};
 
 function dlgEliminarProductos(ids, alTerminar) {
   if (!ids.length) return;
@@ -2656,6 +2712,7 @@ async function cargarCaja() {
   if (!CJ.cuentas.length) nuevaCuenta();
   else CJ.activa = CJ.cuentas.some(c => c.id === g.activa) ? g.activa : CJ.cuentas[0].id;
   CJ.vista = (await DB.get('caja:vista')) || 'imagenes';
+  F.cajaId = F.cajaId || (await DB.get('caja:ultima')) || '';
 }
 const guardarCaja = () => DB.set('caja:' + S.usuario.usuario, CJ.estado);
 
@@ -2703,7 +2760,7 @@ function vCaja(el) {
   el.innerHTML = `
     ${avisoRech}
     <div class="caja-top">
-      <div><b>Caja · ${esc(alm.nombre || '')}</b><small>Abierta ${fechaHora(E.corte.apertura)} · Fondo ${dinero(E.corte.fondo)} · ${plural(E.ventas.filter(v => !v.cancelada).length, 'venta')}</small></div>
+      <div><b>Caja · ${esc(alm.nombre || '')}${E.corte.caja_id ? ' · ' + esc(nombreCaja(E.corte.caja_id) || 'Caja') : ''}</b><small>Abierta ${fechaHora(E.corte.apertura)} · Fondo ${dinero(E.corte.fondo)} · ${plural(E.ventas.filter(v => !v.cancelada).length, 'venta')}</small></div>
       <div class="acciones"><button type="button" class="btn sec" id="cj-ticket">Imprimir ticket</button>
         <button type="button" class="btn sec" id="cj-ventas">Ventas del turno</button>
         <button type="button" class="btn sec" id="cj-abono">Cobrar abono</button>
@@ -2966,21 +3023,63 @@ function pintarAbrirCaja(el, avisoRech) {
       <h2>Abrir caja</h2>
       ${alms.length ? `<form id="cj-abrir" class="form">
         <label>Sucursal<select name="almacen_id">${alms.map(a => `<option value="${esc(a.id)}" ${a.tipo === 'SUCURSAL' && !F.cajaAlm ? '' : ''}${F.cajaAlm === a.id ? 'selected' : ''}>${esc(a.nombre)}</option>`).join('')}</select></label>
-        <label>Fondo inicial (efectivo para cambio)<input name="fondo" type="number" step="0.01" min="0" value="0" inputmode="decimal"></label>
+        <label id="cj-caja-l" hidden>Caja<select name="caja_id"></select></label>
+        <label>Fondo inicial (cuenta el efectivo que hay en la caja)<input name="fondo" type="number" step="0.01" min="0" value="0" inputmode="decimal"></label>
+        <p class="nota" id="cj-ant"></p>
         <button class="btn" type="submit">Abrir caja</button>
+        ${esAdminCaja() ? '<button type="button" class="btn mini sec" id="cj-cajas">Administrar cajas de la sucursal</button>' : ''}
       </form>` : '<p class="txt-error">No tienes una sucursal asignada.</p>'}
       ${E.ultimoCorte ? `<p class="nota">Último corte: ${fechaHora(E.ultimoCorte.cierre)} · diferencia ${dinero(E.ultimoCorte.diferencia)}
         <button type="button" class="btn mini sec" id="cj-reimp-corte">Reimprimir corte</button></p>` : ''}
     </div>`;
   const f = $('#cj-abrir', el);
+  // Cajas de la sucursal elegida (si tiene registradas); se recuerda la última que usó este equipo
+  const llenarCajas = () => {
+    const l = cajasDe(f.almacen_id.value);
+    $('#cj-caja-l', el).hidden = !l.length;
+    f.caja_id.innerHTML = l.length ? '<option value="">Elige la caja…</option>' + l.map(c => {
+      const uso = (S.cajasAbiertas || {})[c.id];
+      return `<option value="${esc(c.id)}">${esc(c.nombre)}${uso ? ` — en uso por ${esc(uso.cajero)}` : ''}</option>`;
+    }).join('') : '';
+    if (l.some(c => c.id === F.cajaId)) f.caja_id.value = F.cajaId;
+    else if (l.length === 1) f.caja_id.value = l[0].id;
+  };
+  const clave = () => claveCaja(f.almacen_id.value, f.caja_id.value);
+  // Lo que dejó el turno anterior de esta caja (su "queda en caja")
+  const anterior = () => (S.cajaAnterior || {})[clave()] || null;
+  const revisarFondo = () => {
+    const a = anterior(), p = $('#cj-ant', el);
+    if (!a || a.queda === null) { p.textContent = ''; return; }
+    const dif = Math.round(((Number(f.fondo.value) || 0) - a.queda) * 100) / 100;
+    p.className = dif ? 'aviso-caja' : 'nota';
+    p.innerHTML = `El turno anterior (${esc(a.cajero)}, ${fechaHora(a.cierre)}) dejó <b>${dinero(a.queda)}</b> en caja.` +
+      (dif ? ` <b>No coincide: ${dif > 0 ? 'sobran' : 'faltan'} ${dinero(Math.abs(dif))}.</b>` : ' ✓ Coincide.');
+  };
   if (f) {
+    const ponerSugerido = () => { const a = anterior(); f.fondo.value = a && a.queda !== null ? a.queda.toFixed(2) : '0'; revisarFondo(); };
+    llenarCajas();
+    ponerSugerido();
+    f.almacen_id.onchange = () => { llenarCajas(); ponerSugerido(); };
+    f.caja_id.onchange = ponerSugerido;
+    const bcj = $('#cj-cajas', el);
+    if (bcj) bcj.onclick = () => dlgCajas(f.almacen_id.value, () => { cerrarModal(); vCaja(el); });
+    f.fondo.oninput = revisarFondo;
     f.fondo.focus();
     f.fondo.select();
     f.onsubmit = async ev => {
       ev.preventDefault();
+      if (cajasDe(f.almacen_id.value).length && !f.caja_id.value) { toast('Elige la caja que vas a usar.', 'error'); f.caja_id.focus(); return; }
+      const uso = (S.cajasAbiertas || {})[clave()];
+      if (uso && uso.usuario_id !== S.usuario.id && !confirm(`${f.caja_id.value ? nombreCaja(f.caja_id.value) : 'Esta caja'} está abierta por ${uso.cajero} desde ${fechaHora(uso.apertura)}. ¿Abrirla de todos modos?`)) return;
+      const a = anterior();
+      const dif = a && a.queda !== null ? Math.round(((Number(f.fondo.value) || 0) - a.queda) * 100) / 100 : 0;
+      if (dif && !confirm(`El fondo no coincide con lo que dejó el turno anterior (${dinero(a.queda)}): ${dif > 0 ? 'sobran' : 'faltan'} ${dinero(Math.abs(dif))}. Quedará registrado en el corte. ¿Abrir la caja así?`)) return;
       F.cajaAlm = f.almacen_id.value;
-      const op = { clase: 'CORTE_ABRIR', id: uuid(), almacen_id: f.almacen_id.value, fondo: Number(f.fondo.value) || 0 };
-      E.corte = { id: op.id, almacen_id: op.almacen_id, fondo: op.fondo, apertura: new Date().toISOString() };
+      F.cajaId = f.caja_id.value;
+      DB.set('caja:ultima', F.cajaId);
+      const op = { clase: 'CORTE_ABRIR', id: uuid(), almacen_id: f.almacen_id.value, caja_id: f.caja_id.value, fondo: Number(f.fondo.value) || 0 };
+      E.corte = { id: op.id, almacen_id: op.almacen_id, caja_id: op.caja_id, fondo: op.fondo, apertura: new Date().toISOString() };
+      S.cajasAbiertas = Object.assign({}, S.cajasAbiertas, { [claveCaja(op.almacen_id, op.caja_id)]: { corte_id: op.id, cajero: S.usuario.nombre, usuario_id: S.usuario.id, apertura: E.corte.apertura } });
       E.ventas = [];
       E.abonos = [];
       await guardarCaja();
@@ -3448,10 +3547,11 @@ function imprimirTicket(v, copias = 1, cajon = false) {
 function imprimirCorte(c) {
   const p = (a, n, neg) => ({ k: 'par', a, b: dinero(n), neg, grande: neg });
   return imprimirDoc(() => [...docEncabezado(c.almacen_id), { k: 'centro', s: 'CORTE DE CAJA', neg: true },
-    { k: 'txt', s: 'Cajero: ' + (c.cajero || S.usuario.nombre) }, { k: 'txt', s: 'Apertura: ' + fechaHora(c.apertura) }, { k: 'txt', s: 'Cierre: ' + fechaHora(c.cierre) },
+    ...(c.caja_id || c.caja ? [{ k: 'txt', s: 'Caja: ' + (c.caja || nombreCaja(c.caja_id)) }] : []), { k: 'txt', s: 'Cajero: ' + (c.cajero || S.usuario.nombre) }, { k: 'txt', s: 'Apertura: ' + fechaHora(c.apertura) }, { k: 'txt', s: 'Cierre: ' + fechaHora(c.cierre) },
     { k: 'sep' }, { k: 'par', a: 'Ventas', b: String(c.ventas) }, p('Total vendido', c.total_ventas), p('Efectivo', c.efectivo), p('Tarjeta', c.tarjeta),
     p('Transferencia', c.transferencia), p('A crédito', c.credito), p('Abonos en efectivo', c.abonos_efectivo), p('Abonos otros medios', c.abonos_otros),
     { k: 'sep' }, p('Fondo inicial', c.fondo), p('Efectivo esperado', c.esperado), p('Efectivo contado', c.contado), p('Diferencia', c.diferencia, true),
+    ...(c.retiro !== undefined && c.retiro !== '' ? [p('Retiro', c.retiro), p('Queda en caja', c.queda)] : []),
     ...(c.notas ? [{ k: 'sep' }, { k: 'txt', s: 'Notas: ' + c.notas }] : []), { k: 'firma', s: 'Firma' }]);
 }
 
@@ -3717,7 +3817,7 @@ function resumenCorteLocal() {
   const vs = E.ventas.filter(v => !v.cancelada);
   const s = (lista, f) => Math.round(lista.reduce((t, x) => t + (Number(f(x)) || 0), 0) * 100) / 100;
   const r = {
-    almacen_id: E.corte.almacen_id, apertura: E.corte.apertura, fondo: Number(E.corte.fondo) || 0, ventas: vs.length,
+    almacen_id: E.corte.almacen_id, caja_id: E.corte.caja_id || '', apertura: E.corte.apertura, fondo: Number(E.corte.fondo) || 0, ventas: vs.length,
     total_ventas: s(vs, v => v.total), efectivo: s(vs, v => v.pagos.efectivo), tarjeta: s(vs, v => v.pagos.tarjeta),
     transferencia: s(vs, v => v.pagos.transferencia), credito: s(vs, v => v.pagos.credito),
     abonos_efectivo: s(E.abonos.filter(a => a.metodo === 'EFECTIVO'), a => a.monto), abonos_otros: s(E.abonos.filter(a => a.metodo !== 'EFECTIVO'), a => a.monto)
@@ -3739,9 +3839,11 @@ function dlgCerrarCaja(alTerminar) {
         ${fila('Fondo inicial', r.fondo)}<b>Efectivo esperado en caja</b><b>${dinero(r.esperado)}</b>
       </div></div>
       <div class="col">
-      <label>Efectivo contado<input name="contado" type="number" step="0.01" min="0" required inputmode="decimal"></label>
+      <label>Efectivo contado (todo el dinero que hay en la caja)<input name="contado" type="number" step="0.01" min="0" required inputmode="decimal"></label>
       <p id="fc-dif" class="cobro-res"></p>
-      <label>Notas<input name="notas" placeholder="Retiros, faltantes, observaciones"></label>
+      <div class="fila2"><label>Retiro (lo que se entrega o deposita)<input name="retiro" type="number" step="0.01" min="0" value="" inputmode="decimal" placeholder="0.00"></label>
+        <label>Queda en caja para el siguiente turno<input name="queda" readonly tabindex="-1"></label></div>
+      <label>Notas<input name="notas" placeholder="Faltantes, observaciones"></label>
       <label class="chk"><input type="checkbox" name="imprimir" ${IMP.auto ? 'checked' : ''}> Imprimir corte</label>
       ${misPendientes().filter(o => o.clase && o.estado === 'pendiente').length ? '<p class="aviso-offline">Hay operaciones por enviar. El corte se enviará después de ellas, en orden.</p>' : ''}
       </div>
@@ -3749,27 +3851,53 @@ function dlgCerrarCaja(alTerminar) {
     </form>`, 'medio');
   const f = $('#fcorte', d);
   f.contado.focus();
-  f.contado.oninput = () => {
-    const dif = Math.round(((Number(f.contado.value) || 0) - r.esperado) * 100) / 100;
-    $('#fc-dif', d).innerHTML = `<span>Diferencia</span><b class="${dif === 0 ? 'cambio' : 'txt-error'}">${dif > 0 ? 'Sobran ' : dif < 0 ? 'Faltan ' : ''}${dinero(Math.abs(dif))}</b>`;
+  const calc = () => {
+    const contado = Math.round((Number(f.contado.value) || 0) * 100) / 100;
+    const retiro = Math.round((Number(f.retiro.value) || 0) * 100) / 100;
+    const dif = Math.round((contado - r.esperado) * 100) / 100;
+    $('#fc-dif', d).innerHTML = f.contado.value === '' ? '' : `<span>Diferencia</span><b class="${dif === 0 ? 'cambio' : 'txt-error'}">${dif > 0 ? 'A favor (sobran) ' : dif < 0 ? 'En contra (faltan) ' : 'Cuadra · '}${dinero(Math.abs(dif))}</b>`;
+    f.queda.value = dinero(Math.max(0, contado - retiro));
+    return { contado, retiro, dif };
   };
+  calc();
+  f.oninput = calc;
   f.onsubmit = async ev => {
     ev.preventDefault();
     const E = CJ.estado;
-    const contado = Math.round(Number(f.contado.value) * 100) / 100;
-    const op = { clase: 'CORTE_CERRAR', id: uuid(), corte_id: E.corte.id, contado, notas: f.notas.value.trim() };
-    const corte = Object.assign({}, r, { contado, diferencia: Math.round((contado - r.esperado) * 100) / 100, cierre: new Date().toISOString(), notas: op.notas, cajero: S.usuario.nombre });
+    const { contado, retiro } = calc();
+    if (retiro > contado + 0.001) { toast('El retiro no puede ser mayor que el efectivo contado.', 'error'); return; }
+    const op = { clase: 'CORTE_CERRAR', id: uuid(), corte_id: E.corte.id, contado, retiro, notas: f.notas.value.trim() };
+    const corte = Object.assign({}, r, { contado, retiro, queda: Math.round((contado - retiro) * 100) / 100,
+      diferencia: Math.round((contado - r.esperado) * 100) / 100, cierre: new Date().toISOString(), notas: op.notas, cajero: S.usuario.nombre });
     await encolarCaja(op);
     E.ultimoCorte = corte;
     E.corte = null;
     E.ventas = [];
     E.abonos = [];
     await guardarCaja();
-    cerrarModal();
-    toast('Caja cerrada.', 'ok');
+    // Lo que deja este turno es lo que debe encontrar el siguiente
+    const k = claveCaja(r.almacen_id, r.caja_id);
+    S.cajaAnterior = Object.assign({}, S.cajaAnterior, { [k]: { cierre: corte.cierre, cajero: S.usuario.nombre, queda: corte.queda } });
+    DB.set('cajaAnterior', S.cajaAnterior);
+    if (S.cajasAbiertas) delete S.cajasAbiertas[k];
     if (f.imprimir.checked) imprimirCorte(corte);
     alTerminar();
+    dlgFinTurno(corte);
   };
+}
+
+// Mensaje al terminar el turno
+function dlgFinTurno(c) {
+  const ok = Math.abs(Number(c.diferencia)) < 0.005;
+  const nombre = String(S.usuario.nombre || '').split(' ')[0];
+  const d = abrirModal(ok ? '¡Corte correcto!' : 'Corte con diferencia', `<div class="form fin-turno ${ok ? 'bien' : 'mal'}">
+    <div class="fin-icono">${ok ? '✓' : '!'}</div>
+    <h3>${ok ? `¡Gracias por tu turno, ${esc(nombre)}!` : `Gracias por tu turno, ${esc(nombre)}.`}</h3>
+    <p>${ok ? 'Tu corte fue correcto: el efectivo coincide con lo esperado.' : `Tu corte tiene ${c.diferencia > 0 ? 'un sobrante' : 'un faltante'} de <b>${dinero(Math.abs(c.diferencia))}</b>. Quedó registrado para que el encargado lo revise.`}</p>
+    <div class="corte-res"><span>Efectivo esperado</span><span>${dinero(c.esperado)}</span><span>Efectivo contado</span><span>${dinero(c.contado)}</span>
+      <span>Retiro</span><span>${dinero(c.retiro)}</span><b>Queda en caja</b><b>${dinero(c.queda)}</b></div>
+    <div class="pie"><button type="button" class="btn sec" id="ft-imp">Imprimir corte</button><button type="button" class="btn" data-cerrar>Terminar</button></div></div>`);
+  $('#ft-imp', d).onclick = () => imprimirCorte(c);
 }
 
 function dlgRechazadasCaja(alCerrar) {
@@ -3806,7 +3934,7 @@ const VT = { pestana: 'ventas', desde: '', hasta: '', alm: '', ventas: null, cor
 function vVentas(el) {
   if (!VT.desde) { VT.desde = hoyLocal(); VT.hasta = hoyLocal(); }
   el.innerHTML = `<div class="titulo"><h2>Ventas y clientes</h2></div>
-    <div class="segmentos" id="vt-tabs">${[['ventas', 'Ventas'], ['cortes', 'Cortes de caja'], ['clientes', 'Clientes'], ['cobrar', 'Por cobrar']]
+    <div class="segmentos" id="vt-tabs">${[['ventas', 'Ventas'], ['cortes', 'Turnos y cortes'], ['clientes', 'Clientes'], ['cobrar', 'Por cobrar']]
       .map(([k, t]) => `<button type="button" data-t="${k}" class="${VT.pestana === k ? 'activo' : ''}">${t}</button>`).join('')}</div>
     <div id="vt-cuerpo"></div>`;
   const c = $('#vt-cuerpo', el);
@@ -3918,23 +4046,218 @@ function exportarVentas() {
   ]), `ventas-${VT.desde}-a-${VT.hasta}.xlsx`);
 }
 
+/* ---- Turnos de caja (cortes) ---- */
+// Tablero por día: cada turno con su inicio de caja (y si cuadra con el anterior), ventas por forma de pago,
+// esperado, contado, diferencia, retiro y lo que quedó. Cada total abre su desglose y cada venta su detalle.
+const PAGOS_TXT = { total: 'Ventas', efectivo: 'Efectivo', tarjeta: 'Tarjeta', transferencia: 'Transferencia', credito: 'Crédito' };
+
 async function pintarCortes(c) {
-  c.innerHTML = '<div id="ct-lista"></div>';
-  const r = await pedir(c, 'Consultando cortes…', () => api('cortes', {}));
-  if (!r) return;
-  VT.cortes = r;
-  c.innerHTML = r.length ? `<div class="tabla-cont"><table class="tabla"><thead><tr><th>Apertura</th><th>Cierre</th><th>Sucursal</th><th>Cajero</th><th class="num">Ventas</th>
-    <th class="num">Total</th><th class="num">Esperado</th><th class="num">Contado</th><th class="num">Diferencia</th><th></th></tr></thead>
-    <tbody>${r.map(k => `<tr><td>${fechaHora(k.apertura)}</td><td>${k.estado === 'CERRADO' ? fechaHora(k.cierre) : '<span class="est est-ENVIADA">Abierta</span>'}</td>
-      <td>${esc((S.idx.alm[k.almacen_id] || {}).nombre || '')}</td><td>${esc(k.cajero)}</td><td class="num">${k.estado === 'CERRADO' ? k.ventas : ''}</td>
-      <td class="num">${k.estado === 'CERRADO' ? dinero(k.total_ventas) : ''}</td><td class="num">${k.estado === 'CERRADO' ? dinero(k.esperado) : ''}</td>
-      <td class="num">${k.estado === 'CERRADO' ? dinero(k.contado) : ''}</td><td class="num ${Number(k.diferencia) ? 'txt-error' : ''}">${k.estado === 'CERRADO' ? dinero(k.diferencia) : ''}</td>
-      <td>${k.estado === 'CERRADO' ? `<button type="button" class="btn mini sec" data-imp="${esc(k.id)}">Imprimir</button>` : ''}</td></tr>`).join('')}</tbody></table></div>
-    <p class="nota">Cortes de los últimos 31 días.</p>` : '<p class="vacio">Sin cortes de caja.</p>';
-  c.onclick = e => {
-    const b = e.target.closest('[data-imp]');
-    if (b) imprimirCorte(VT.cortes.find(k => k.id === b.dataset.imp));
+  if (!VT.tDesde) { VT.tDesde = hoyLocal(); VT.tHasta = hoyLocal(); }
+  const alms = esGeneral() ? S.catalogo.almacenes.filter(a => esActivo(a.activo)).sort(porNombre) : [];
+  c.innerHTML = `<div class="filtros">
+      <label class="chk">Desde <input type="date" id="tu-desde" value="${VT.tDesde}"></label>
+      <label class="chk">Hasta <input type="date" id="tu-hasta" value="${VT.tHasta}"></label>
+      ${alms.length ? `<select id="tu-alm"><option value="">Todas las sucursales</option>${alms.map(a => `<option value="${esc(a.id)}" ${VT.tAlm === a.id ? 'selected' : ''}>${esc(a.nombre)}</option>`).join('')}</select>` : ''}
+      ${(S.cajas || []).length ? `<select id="tu-caja"><option value="">Todas las cajas</option>${(S.cajas || []).slice().sort((a, b) => String(a.nombre).localeCompare(b.nombre, 'es', { numeric: true }))
+        .map(cj => `<option value="${esc(cj.id)}" ${VT.tCaja === cj.id ? 'selected' : ''}>${esc(cj.nombre)}${alms.length ? ' · ' + esc((S.idx.alm[cj.almacen_id] || {}).nombre || '') : ''}</option>`).join('')}</select>` : ''}
+      <button type="button" class="btn sec" id="tu-hoy">Hoy</button><button type="button" class="btn sec" id="tu-buscar">Consultar</button>
+    </div><div id="tu-cuerpo"></div>`;
+  const cuerpo = $('#tu-cuerpo', c);
+  const cargar = async () => {
+    VT.tDesde = $('#tu-desde', c).value; VT.tHasta = $('#tu-hasta', c).value; VT.tAlm = ($('#tu-alm', c) || {}).value || '';
+    VT.tCaja = ($('#tu-caja', c) || {}).value || '';
+    const r = await pedir(cuerpo, 'Consultando turnos…', () => Promise.all([
+      api('cortes', { desde: VT.tDesde, hasta: VT.tHasta, almacen_id: VT.tAlm, caja_id: VT.tCaja }),
+      api('ventas', { desde: VT.tDesde, hasta: VT.tHasta, almacen_id: VT.tAlm })]));
+    if (!r) return;
+    [VT.cortes, VT.tVentas] = r;
+    // Con una caja elegida, el resumen cuenta solo las ventas de sus turnos
+    if (VT.tCaja) { const ids = new Set(VT.cortes.map(k => k.id)); VT.tVentas = VT.tVentas.filter(v => ids.has(v.corte_id)); }
+    VT.tDetalle = {};
+    pintarTablero();
   };
+  const pintarTablero = () => {
+    const cortes = VT.cortes, vs = VT.tVentas.filter(v => !v.cancelada);
+    const s = (l, k) => Math.round(l.reduce((t, x) => t + (Number(x[k]) || 0), 0) * 100) / 100;
+    const cerrados = cortes.filter(k => k.estado === 'CERRADO');
+    const faltan = s(cerrados.filter(k => k.diferencia < 0), 'diferencia'), sobran = s(cerrados.filter(k => k.diferencia > 0), 'diferencia');
+    const tarjeta = (k, t, valor, extra = '', cls = '') => `<button type="button" class="tarjeta clic ${cls}" data-res="${k}"><span>${t}</span><b>${valor}</b>${extra}</button>`;
+    cuerpo.innerHTML = `
+      <h3 class="tu-sub">Resumen ${VT.tDesde === VT.tHasta ? 'del día ' + fechaCorta(VT.tDesde) : `del ${fechaCorta(VT.tDesde)} al ${fechaCorta(VT.tHasta)}`}</h3>
+      <div class="tarjetas tu-res">
+        ${tarjeta('total', 'Venta total', dinero(s(vs, 'total')), `<small>${plural(vs.length, 'venta')}</small>`)}
+        ${tarjeta('efectivo', 'Efectivo', dinero(s(vs, 'efectivo')))}
+        ${tarjeta('tarjeta', 'Tarjeta', dinero(s(vs, 'tarjeta')))}
+        ${tarjeta('transferencia', 'Transferencias', dinero(s(vs, 'transferencia')))}
+        ${tarjeta('credito', 'A crédito', dinero(s(vs, 'credito')))}
+        ${tarjeta('retiros', 'Retiros de caja', dinero(s(cerrados, 'retiro')), `<small>${plural(cerrados.length, 'turno')} ${cerrados.length === 1 ? 'cerrado' : 'cerrados'}</small>`)}
+        ${tarjeta('difs', 'Faltantes / sobrantes', `${faltan ? '−' + dinero(-faltan) : dinero(0)}`, sobran ? `<small>Sobrantes ${dinero(sobran)}</small>` : '', faltan ? 'alerta' : '')}
+        ${tarjeta('productos', 'Productos vendidos', numero(vs.reduce((t, v) => t + v.lineas.reduce((x, l) => x + Number(l.cantidad), 0), 0)), '<small>ver los más vendidos</small>')}
+      </div>
+      <h3 class="tu-sub">Turnos</h3>
+      ${cortes.length ? `<div class="turnos">${cortes.map(tarjetaTurno).join('')}</div>` : '<p class="vacio">No hay turnos en estas fechas.</p>'}`;
+  };
+  cuerpo.onclick = e => {
+    const res = e.target.closest('[data-res]'), tu = e.target.closest('[data-tu]');
+    const vs = VT.tVentas || [];
+    if (res) {
+      const k = res.dataset.res;
+      if (k === 'productos') return dlgProductosVendidos('Productos vendidos', vs);
+      if (k === 'retiros' || k === 'difs') return dlgListaCortes(k);
+      return dlgListaVentas(`${PAGOS_TXT[k]} · ${VT.tDesde === VT.tHasta ? fechaCorta(VT.tDesde) : 'periodo'}`, vs, k);
+    }
+    if (tu) {
+      const corte = VT.cortes.find(x => x.id === tu.dataset.tu), k = tu.dataset.k;
+      const deTurno = vs.filter(v => v.corte_id === corte.id);
+      const titulo = `${PAGOS_TXT[k] || ''} · turno de ${corte.cajero}`;
+      if (k === 'productos') return dlgProductosVendidos(`Productos vendidos · turno de ${corte.cajero}`, deTurno);
+      if (k === 'abonos') return dlgAbonosTurno(corte);
+      if (k === 'anterior' && corte.anterior) {
+        const prev = VT.cortes.find(x => x.id === corte.anterior.id);
+        if (prev) return dlgCorteResumen(prev);
+        return toast('El turno anterior es de otra fecha; amplía el periodo para verlo.', '');
+      }
+      if (k === 'corte') return dlgCorteResumen(corte);
+      return dlgListaVentas(titulo, deTurno, k);
+    }
+  };
+  $('#tu-buscar', c).onclick = cargar;
+  $('#tu-hoy', c).onclick = () => { $('#tu-desde', c).value = hoyLocal(); $('#tu-hasta', c).value = hoyLocal(); cargar(); };
+  VT.tRecargar = cargar;
+  await cargar();
+}
+
+function tarjetaTurno(k) {
+  const abierto = k.estado !== 'CERRADO';
+  const alm = (S.idx.alm[k.almacen_id] || {}).nombre || '';
+  const dif = Number(k.diferencia) || 0;
+  const estado = abierto ? '<span class="est est-ENVIADA">En curso</span>'
+    : Math.abs(dif) < 0.005 ? '<span class="est est-RECIBIDA">Corte correcto</span>'
+    : `<span class="est est-ATRASADA">${dif < 0 ? 'Faltan' : 'Sobran'} ${dinero(Math.abs(dif))}</span>`;
+  let inicio;
+  if (!k.anterior) inicio = '<span class="txt-suave">Primer turno registrado en esta caja</span>';
+  else if (k.anterior.queda === null) inicio = `<span class="txt-suave">El turno anterior (${esc(k.anterior.cajero)}) no registró lo que dejó</span>`;
+  else if (Math.abs(k.dif_apertura) < 0.005) inicio = `<span class="txt-ok">✓ Cuadra con lo que dejó ${esc(k.anterior.cajero)}</span>`;
+  else inicio = `<span class="txt-error">✗ ${esc(k.anterior.cajero)} dejó ${dinero(k.anterior.queda)}: ${k.dif_apertura < 0 ? 'faltan' : 'sobran'} ${dinero(Math.abs(k.dif_apertura))}</span>`;
+  const b = (key, t, v, cls = '') => `<button type="button" class="tu-dato ${cls}" data-tu="${esc(k.id)}" data-k="${key}"><span>${t}</span><b>${v}</b></button>`;
+  const vs = (VT.tVentas || []).filter(v => v.corte_id === k.id && !v.cancelada);
+  const suma = c => Math.round(vs.reduce((t, v) => t + (Number(v[c]) || 0), 0) * 100) / 100;
+  // Mientras está abierto, los totales salen de las ventas ya registradas
+  const val = c => (abierto ? suma(c) : Number(k[c === 'total' ? 'total_ventas' : c]) || 0);
+  return `<article class="turno ${abierto ? 'abierto' : Math.abs(dif) < 0.005 ? 'bien' : 'mal'}">
+    <header><div><b>${esc(k.cajero)}</b> · ${esc(alm)}${k.caja ? ` · <b>${esc(k.caja)}</b>` : ''}<small>${fechaHora(k.apertura)} → ${abierto ? 'en curso' : fechaHora(k.cierre)}</small></div>${estado}</header>
+    <div class="tu-inicio"><button type="button" class="tu-dato" data-tu="${esc(k.id)}" data-k="anterior"><span>Inicio de caja</span><b>${dinero(k.fondo)}</b></button><p>${inicio}</p></div>
+    <div class="tu-grid">
+      ${b('total', `Ventas (${abierto ? vs.length : k.ventas})`, dinero(val('total')), 'fuerte')}
+      ${b('efectivo', 'Efectivo', dinero(val('efectivo')))}${b('tarjeta', 'Tarjeta', dinero(val('tarjeta')))}
+      ${b('transferencia', 'Transferencia', dinero(val('transferencia')))}${b('credito', 'Crédito', dinero(val('credito')))}
+      ${b('abonos', 'Abonos', abierto ? 'ver' : dinero((Number(k.abonos_efectivo) || 0) + (Number(k.abonos_otros) || 0)))}
+      ${abierto ? '' : `${b('corte', 'Esperado en caja', dinero(k.esperado))}${b('corte', 'Contado', dinero(k.contado))}
+      ${b('corte', 'Diferencia', `${dif > 0 ? '+' : dif < 0 ? '−' : ''}${dinero(Math.abs(dif))}`, Math.abs(dif) < 0.005 ? 'ok' : 'error')}
+      ${b('corte', 'Retiro', k.retiro === '' || k.retiro === undefined ? '—' : dinero(k.retiro))}
+      ${b('corte', 'Queda en caja', k.queda === '' || k.queda === undefined ? '—' : dinero(k.queda))}`}
+      ${b('productos', 'Productos vendidos', numero(vs.reduce((t, v) => t + v.lineas.reduce((x, l) => x + Number(l.cantidad), 0), 0)))}
+    </div>
+    ${k.notas ? `<p class="nota">Notas: ${esc(k.notas)}</p>` : ''}
+  </article>`;
+}
+
+// Lista de ventas (todas o solo las pagadas con una forma de pago); cada una abre su detalle
+function dlgListaVentas(titulo, ventas, campo = 'total') {
+  const lista = ventas.filter(v => campo === 'total' || Number(v[campo]) > 0).slice().sort((a, b) => new Date(b.fecha) - new Date(a.fecha));
+  const validas = lista.filter(v => !v.cancelada);
+  const total = Math.round(validas.reduce((t, v) => t + Number(v[campo]), 0) * 100) / 100;
+  const abrir = () => {
+    const d = abrirModal(titulo, `<div class="form">
+      <div class="dh-cab"><span>${plural(validas.length, 'venta')}${lista.length > validas.length ? ` · ${lista.length - validas.length} cancelada(s)` : ''}</span><b>${dinero(total)}</b></div>
+      ${lista.length ? `<div class="tabla-cont"><table class="tabla"><thead><tr><th>Folio</th><th>Hora</th><th>Cajero</th><th>Cliente</th>${campo !== 'total' ? `<th class="num">${PAGOS_TXT[campo]}</th>` : ''}<th class="num">Total</th></tr></thead>
+        <tbody>${lista.map(v => `<tr class="clic ${v.cancelada ? 'inactivo' : ''}" data-v="${esc(v.id)}"><td><b>${esc(v.folio)}</b>${v.cancelada ? '<small>cancelada</small>' : ''}</td>
+          <td>${new Date(v.fecha).toLocaleString('es-MX', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}</td><td>${esc(v.cajero)}</td>
+          <td>${esc(clienteNombre(v.cliente_id))}</td>${campo !== 'total' ? `<td class="num">${dinero(v[campo])}</td>` : ''}<td class="num">${dinero(v.total)}</td></tr>`).join('')}</tbody></table></div>
+        <p class="nota">Toca una venta para ver sus productos.</p>` : '<p class="vacio">Sin ventas.</p>'}</div>`, true);
+    d.onclick = e => {
+      const tr = e.target.closest('tr[data-v]');
+      if (!tr) return;
+      dlgVentaDetalle(lista.find(v => v.id === tr.dataset.v), () => VT.tRecargar && VT.tRecargar());
+      botonVolver(abrir);
+    };
+  };
+  abrir();
+}
+
+// Agrega "← Volver" arriba de la ventana para regresar a la lista anterior
+function botonVolver(fn) {
+  const cu = $('#dlg .dlg-cuerpo');
+  if (!cu) return;
+  const b = document.createElement('button');
+  b.type = 'button'; b.className = 'btn mini sec volver'; b.textContent = '← Volver';
+  b.onclick = fn;
+  cu.prepend(b);
+}
+
+// Productos vendidos: piezas, importe y número de ventas, ordenables
+function dlgProductosVendidos(titulo, ventas) {
+  const m = {};
+  ventas.filter(v => !v.cancelada).forEach(v => v.lineas.forEach(l => {
+    const x = m[l.producto_id] = m[l.producto_id] || { producto_id: l.producto_id, cantidad: 0, importe: 0, ventas: 0 };
+    x.cantidad += Number(l.cantidad); x.importe += Number(l.cantidad) * Number(l.precio); x.ventas++;
+  }));
+  let orden = 'cantidad';
+  const d = abrirModal(titulo, `<div class="form"><div class="segmentos" id="pv-orden"><button type="button" data-o="cantidad" class="activo">Más piezas</button><button type="button" data-o="importe">Mayor importe</button></div><div id="pv-lista"></div></div>`, true);
+  const pintar = () => {
+    const l = Object.values(m).sort((a, b) => b[orden] - a[orden]);
+    const tot = l.reduce((t, x) => t + x.importe, 0);
+    $('#pv-lista', d).innerHTML = l.length ? `<div class="tabla-cont"><table class="tabla"><thead><tr><th>#</th><th>Producto</th><th class="num">Piezas</th><th class="num">Importe</th><th class="num">% de la venta</th><th class="num">Ventas</th></tr></thead>
+      <tbody>${l.map((x, i) => { const p = S.idx.prod[x.producto_id] || {}; return `<tr><td>${i + 1}</td><td>${esc(p.nombre || '—')}<small>${esc(p.codigo || '')}</small></td>
+        <td class="num"><b>${numero(Math.round(x.cantidad * 1000) / 1000)}</b> ${esc(p.unidad || '')}</td><td class="num">${dinero(x.importe)}</td>
+        <td class="num">${tot ? (x.importe / tot * 100).toFixed(1) + '%' : '—'}</td><td class="num">${x.ventas}</td></tr>`; }).join('')}</tbody></table></div>`
+      : '<p class="vacio">Sin productos vendidos.</p>';
+  };
+  pintar();
+  $('#pv-orden', d).onclick = e => {
+    const b = e.target.closest('[data-o]');
+    if (!b) return;
+    orden = b.dataset.o;
+    $$('#pv-orden button', d).forEach(x => x.classList.toggle('activo', x === b));
+    pintar();
+  };
+}
+
+async function dlgAbonosTurno(k) {
+  let det = VT.tDetalle[k.id];
+  if (!det) {
+    try { det = VT.tDetalle[k.id] = await conCarga('Cargando abonos…', () => api('turno', { id: k.id })); } catch (e) { toast(e.message, 'error'); return; }
+  }
+  abrirModal(`Abonos · turno de ${k.cajero}`, `<div class="form">${det.abonos.length ? `<div class="tabla-cont"><table class="tabla"><thead><tr><th>Hora</th><th>Cliente</th><th>Forma de pago</th><th class="num">Monto</th></tr></thead>
+    <tbody>${det.abonos.map(a => `<tr><td>${fechaHora(a.fecha_abono || a.registrado)}</td><td>${esc(a.cliente)}</td><td>${esc(METODOS_CAJA[a.metodo] || a.metodo)}</td><td class="num">${dinero(a.monto)}</td></tr>`).join('')}</tbody></table></div>`
+    : '<p class="vacio">Sin abonos en este turno.</p>'}</div>`);
+}
+
+// Resumen del corte de un turno (para revisar o reimprimir)
+function dlgCorteResumen(k) {
+  const f = (t, n) => `<span>${t}</span><span>${dinero(n)}</span>`;
+  const d = abrirModal(`Corte de ${k.cajero}`, `<div class="form">
+    <p>${esc((S.idx.alm[k.almacen_id] || {}).nombre || '')} · ${fechaHora(k.apertura)} → ${k.estado === 'CERRADO' ? fechaHora(k.cierre) : 'en curso'}</p>
+    ${k.estado === 'CERRADO' ? `<div class="corte-res">${f('Inicio de caja (fondo)', k.fondo)}${f('Ventas en efectivo', k.efectivo)}${f('Abonos en efectivo', k.abonos_efectivo)}
+      <b>Efectivo esperado</b><b>${dinero(k.esperado)}</b>${f('Efectivo contado', k.contado)}
+      <b>Diferencia</b><b class="${Math.abs(k.diferencia) < 0.005 ? 'cambio' : 'txt-error'}">${k.diferencia > 0 ? 'A favor ' : k.diferencia < 0 ? 'En contra ' : ''}${dinero(Math.abs(k.diferencia))}</b>
+      ${k.retiro !== '' && k.retiro !== undefined ? f('Retiro', k.retiro) + `<b>Queda en caja</b><b>${dinero(k.queda)}</b>` : ''}</div>
+      <div class="corte-res">${f('Tarjeta', k.tarjeta)}${f('Transferencia', k.transferencia)}${f('A crédito', k.credito)}${f('Abonos otros medios', k.abonos_otros)}<b>Venta total</b><b>${dinero(k.total_ventas)}</b></div>
+      ${k.notas ? `<p class="nota">Notas: ${esc(k.notas)}</p>` : ''}
+      <div class="acciones"><button type="button" class="btn sec" id="cr-imp">Imprimir corte</button></div>` : '<p class="nota">El turno sigue abierto.</p>'}</div>`);
+  const bi = $('#cr-imp', d);
+  if (bi) bi.onclick = () => imprimirCorte(k);
+}
+
+// Turnos con retiro o con diferencia en el periodo
+function dlgListaCortes(tipo) {
+  const l = VT.cortes.filter(k => k.estado === 'CERRADO' && (tipo === 'retiros' ? Number(k.retiro) > 0 : Math.abs(Number(k.diferencia)) >= 0.005));
+  const d = abrirModal(tipo === 'retiros' ? 'Retiros de caja' : 'Faltantes y sobrantes', `<div class="form">${l.length ? `<div class="tabla-cont"><table class="tabla"><thead><tr><th>Cierre</th><th>Cajero</th><th>Sucursal</th><th class="num">${tipo === 'retiros' ? 'Retiro' : 'Diferencia'}</th><th class="num">Queda en caja</th></tr></thead>
+    <tbody>${l.map(k => `<tr class="clic" data-k="${esc(k.id)}"><td>${fechaHora(k.cierre)}</td><td>${esc(k.cajero)}</td><td>${esc((S.idx.alm[k.almacen_id] || {}).nombre || '')}</td>
+      <td class="num ${tipo === 'difs' ? 'txt-error' : ''}">${tipo === 'retiros' ? dinero(k.retiro) : (k.diferencia > 0 ? '+' : '−') + dinero(Math.abs(k.diferencia))}</td><td class="num">${k.queda === '' ? '—' : dinero(k.queda)}</td></tr>`).join('')}</tbody></table></div>`
+    : `<p class="vacio">${tipo === 'retiros' ? 'Sin retiros registrados.' : 'Todos los cortes cuadraron.'}</p>`}</div>`, true);
+  const abrir = () => dlgListaCortes(tipo);
+  d.onclick = e => { const tr = e.target.closest('tr[data-k]'); if (tr) { dlgCorteResumen(VT.cortes.find(k => k.id === tr.dataset.k)); botonVolver(abrir); } };
 }
 
 async function cargarClientesAdm(c) {
@@ -4736,7 +5059,8 @@ function vAlmacenes(el) {
         <b>${esc(a.nombre)}</b>
         <small>${esc(a.direccion || 'Sin dirección')}</small>
         <small>${esc(a.responsable || '')}${a.telefono ? ' · ' + esc(a.telefono) : ''}</small>
-        <small>${numero(prods)} productos con existencia · ${dinero(valor)}</small></button>`;
+        <small>${numero(prods)} productos con existencia · ${dinero(valor)}</small>
+        ${a.tipo === 'SUCURSAL' && cajasDe(a.id).length ? `<small>Cajas: ${esc(cajasDe(a.id).map(c => c.nombre).join(', '))}</small>` : ''}</button>`;
     }).join('') || '<p class="vacio">Sin almacenes.</p>';
   };
   pintar();
@@ -4746,6 +5070,56 @@ function vAlmacenes(el) {
     const b = e.target.closest('[data-id]');
     if (b) dlgAlmacen(S.idx.alm[b.dataset.id]);
   };
+}
+
+/* ---- Cajas de cobro de cada sucursal ---- */
+const claveCaja = (almacenId, cajaId) => cajaId || 'ALM:' + almacenId;
+const cajasDe = (almacenId, todas = false) => (S.cajas || []).filter(c => c.almacen_id === almacenId && (todas || c.activo !== false))
+  .sort((a, b) => String(a.nombre).localeCompare(String(b.nombre), 'es', { numeric: true }));
+const nombreCaja = id => ((S.cajas || []).find(c => c.id === id) || {}).nombre || '';
+
+function dlgCajas(almacenId, alVolver) {
+  const alm = S.idx.alm[almacenId] || {};
+  const d = abrirModal(`Cajas · ${alm.nombre || ''}`, `<div class="form">
+    <p class="nota">Cada caja lleva su propio turno: al abrir, la app compara el fondo con lo que dejó el turno anterior de esa misma caja. Si la sucursal tiene una sola caja no hace falta registrarla.</p>
+    <ul class="lista" id="cjs-lista"></ul>
+    <form id="fcjs" class="fila-form"><input name="nombre" placeholder="Nombre de la caja (ej. Caja 1, Caja rápida)" required maxlength="40"><button class="btn">Agregar caja</button></form>
+    <p class="msg" id="cjs-msg"></p>
+    ${alVolver ? '<div class="pie"><button type="button" class="btn sec" id="cjs-volver">Listo</button></div>' : ''}</div>`);
+  const msg = $('#cjs-msg', d);
+  const pintar = () => {
+    const l = cajasDe(almacenId, true);
+    $('#cjs-lista', d).innerHTML = l.length ? l.map(c => `<li><span class="${c.activo !== false ? '' : 'tachado'}">${esc(c.nombre)}${(S.cajasAbiertas || {})[c.id] ? ` <small>en uso: ${esc(S.cajasAbiertas[c.id].cajero)}</small>` : ''}</span>
+      <span class="acciones"><button type="button" class="btn mini sec" data-ren="${esc(c.id)}">Cambiar nombre</button>
+      <button type="button" class="btn mini sec" data-tog="${esc(c.id)}">${c.activo !== false ? 'Desactivar' : 'Activar'}</button></span></li>`).join('')
+      : '<li class="nota">Sin cajas registradas: la sucursal funciona como una sola caja.</li>';
+  };
+  const guardar = async caja => {
+    if (!navigator.onLine) { msg.textContent = 'Necesitas conexión para guardar.'; return false; }
+    try {
+      const r = await conCarga('Guardando…', () => api('guardarCaja', { caja: Object.assign({ almacen_id: almacenId }, caja) }));
+      S.cajas = (S.cajas || []).filter(c => c.almacen_id !== almacenId).concat(r);
+      DB.set('cajas', { lista: S.cajas, abiertas: S.cajasAbiertas || {} });
+      msg.textContent = '';
+      pintar();
+      return true;
+    } catch (e) { msg.textContent = e.message; return false; }
+  };
+  pintar();
+  $('#fcjs', d).onsubmit = async ev => {
+    ev.preventDefault();
+    const f = ev.target;
+    if (await guardar({ nombre: f.nombre.value.trim() })) f.reset();
+  };
+  $('#cjs-lista', d).onclick = e => {
+    const r = e.target.closest('[data-ren]'), t = e.target.closest('[data-tog]');
+    const c = (S.cajas || []).find(x => x.id === (r || t || {}).dataset?.[r ? 'ren' : 'tog']);
+    if (!c) return;
+    if (r) { const n = prompt('Nuevo nombre de la caja:', c.nombre); if (n && n.trim()) guardar({ id: c.id, nombre: n.trim(), activo: c.activo !== false }); }
+    if (t) guardar({ id: c.id, nombre: c.nombre, activo: c.activo === false });
+  };
+  const v = $('#cjs-volver', d);
+  if (v) v.onclick = alVolver;
 }
 
 function dlgAlmacen(a) {
@@ -4763,10 +5137,14 @@ function dlgAlmacen(a) {
         <label>Teléfono<input name="telefono" type="tel" value="${esc(a.telefono || '')}"></label>
       </div>
       <label class="chk"><input type="checkbox" name="activo" ${esActivo(a.activo) ? 'checked' : ''}> Activo</label>
+      ${!nuevo && a.tipo === 'SUCURSAL' ? `<div class="campo"><span>Cajas de cobro</span><div class="fila-form"><span class="nota">${esc(cajasDe(a.id).map(c => c.nombre).join(', ') || 'Una sola caja (sin registrar)')}</span>
+        <button type="button" class="btn mini sec" id="fa-cajas">Administrar cajas</button></div></div>` : ''}
       <p class="msg" id="fa-msg"></p>
       <div class="pie"><button type="button" class="btn sec" data-cerrar>Cancelar</button><button class="btn" type="submit">Guardar</button></div>
     </form>`);
   const f = $('#fa', d);
+  const bc = $('#fa-cajas', d);
+  if (bc) bc.onclick = () => dlgCajas(a.id, () => dlgAlmacen(a));
   f.onsubmit = async ev => {
     ev.preventDefault();
     const msg = $('#fa-msg', d);

@@ -203,6 +203,37 @@ Al actualizar el servidor a esta versión hay que ejecutar **instalar** otra vez
 
 **Traspasos entre sucursales:** la solicitud llega a la sección **Pedidos** del almacén que surte, sea la bodega o una sucursal. Su administrador la acepta, la surte (sale de su inventario) y la sucursal que pidió confirma la entrega (entra a su inventario).
 
+## Turnos y cortes de caja
+
+**Cajas de cobro:** cada sucursal puede tener varias cajas (Caja 1, Caja 2, Caja rápida…). Se dan de alta en **Almacenes > (sucursal) > Administrar cajas**, o desde la pantalla de abrir caja (administradores). Si una sucursal no registra cajas, funciona como una sola caja.
+
+**Abrir caja:**
+
+- Se elige la caja. La app propone como fondo lo que dejó el turno anterior **de esa misma caja** ("Queda en caja") y avisa si lo contado no coincide.
+- Si no coincide, pide confirmar y queda registrado.
+- Si la caja ya está abierta por otra persona, avisa antes de abrirla.
+- Cada equipo recuerda la última caja que usó.
+
+**Cerrar caja (corte):**
+
+1. Se cuenta todo el efectivo de la caja.
+2. La app compara contra lo esperado (fondo + ventas en efectivo + abonos en efectivo) y marca la diferencia a favor o en contra.
+3. Se anota el **retiro** (lo que se entrega o deposita). Lo demás es lo que **queda en caja** para el siguiente turno.
+4. Al terminar aparece un mensaje: "¡Gracias por tu turno! Tu corte fue correcto", o el faltante o sobrante si lo hubo.
+
+**Ventas > Turnos y cortes** (administradores):
+
+- **Filtros:** fechas, sucursal y caja.
+- **Resumen del día o del periodo:** venta total, efectivo, tarjeta, transferencias, crédito, retiros, faltantes y sobrantes, y productos vendidos.
+- **Una tarjeta por turno:** cajero, caja, horario, inicio de caja (y si cuadra con lo que dejó el turno anterior), ventas por forma de pago, abonos, esperado, contado, diferencia, retiro y lo que quedó en caja.
+- **Desgloses:** cada total abre su lista de ventas, cada venta muestra sus productos, y "← Volver" regresa a la lista.
+
+## Productos más vendidos
+
+En **Productos**, el selector "Ordenar" permite ver los más vendidos por **piezas** o por **importe**, en los últimos 7 días, esta semana, este mes, los últimos 30 días o el mes pasado. Muestra el lugar (#), lo vendido y el importe, sin contar ventas canceladas. Disponible para el administrador general, el administrador de sucursal y control de inventarios.
+
+Al actualizar el servidor a esta versión hay que ejecutar **instalar** otra vez (agrega la hoja Cajas y las columnas de caja, retiro y "queda en caja" a los cortes).
+
 ## Ventanas ajustadas a la pantalla
 
 Las ventanas (cobro, producto, impresora, corte, apariencia, etc.) nunca son más altas que la pantalla:

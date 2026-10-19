@@ -584,3 +584,33 @@ dialog.medio { width: min(900px, calc(100vw - 24px)); }
   #fcob .cobro-total b { font-size: 1.7rem; }
   #fcob .billetes button { padding: .35em; }
 }
+
+/* Turnos y cortes */
+.tu-sub { margin: 6px 0 0; font-size: 1rem; color: var(--suave); }
+.tarjeta.clic { text-align: left; font: inherit; color: inherit; cursor: pointer; }
+.tarjeta.clic:hover { border-color: var(--primario); }
+.turnos { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(min(100%, 480px), 1fr)); }
+.turno { background: var(--panel); border: 1px solid var(--borde); border-left: 5px solid var(--suave); border-radius: var(--radio); padding: 12px; display: flex; flex-direction: column; gap: 10px; box-shadow: var(--sombra); }
+.turno.bien { border-left-color: var(--ok); } .turno.mal { border-left-color: var(--peligro); } .turno.abierto { border-left-color: var(--primario); }
+.turno header { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
+.tu-inicio { display: flex; align-items: center; gap: 12px; background: var(--bg); border-radius: 8px; padding: 6px 8px; }
+.tu-inicio p { margin: 0; font-size: .9rem; }
+.tu-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+@media (max-width: 520px) { .tu-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.tu-dato { display: flex; flex-direction: column; align-items: flex-start; gap: 1px; text-align: left; font: inherit; color: var(--texto); background: none;
+  border: 1px solid var(--borde); border-radius: 8px; padding: 6px 8px; cursor: pointer; min-width: 0; }
+.tu-dato:hover { border-color: var(--primario); background: var(--primario-suave); }
+.tu-dato span { font-size: .78rem; color: var(--suave); }
+.tu-dato b { font-size: 1rem; }
+.tu-dato.fuerte b { color: var(--primario); font-size: 1.1rem; }
+.tu-dato.ok b { color: var(--ok); } .tu-dato.error b { color: var(--peligro); }
+.tu-inicio .tu-dato { border: 0; padding: 0 6px 0 0; flex: none; }
+.txt-ok { color: var(--ok); font-weight: 600; }
+.btn.volver { align-self: flex-start; margin-bottom: 8px; }
+/* Fin de turno */
+.fin-turno { text-align: center; align-items: center; }
+.fin-turno .corte-res { width: 100%; text-align: left; }
+.fin-icono { width: 64px; height: 64px; border-radius: 50%; display: grid; place-items: center; font-size: 2rem; font-weight: 800; color: #fff; }
+.fin-turno.bien .fin-icono { background: var(--ok); } .fin-turno.mal .fin-icono { background: var(--aviso); }
+.fin-turno .pie { width: 100%; }
+.tabla .rank { color: var(--primario); font-weight: 700; }
