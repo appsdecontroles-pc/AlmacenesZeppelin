@@ -382,11 +382,13 @@ También puede **verificar un precio** sin agregarlo.
 
 ## Verificador de precios (tablet en la pared)
 
-1. En **Usuarios**, crea un usuario con rol **Verificador de precios** (no se le pide cambiar contraseña y su sesión no vence).
+1. Hay dos formas:
+   - Desde cualquier equipo con tu usuario: **Vender > Verificador de precios**. El equipo se queda en esa pantalla aunque se recargue, hasta que un colaborador lo saque.
+   - Con una cuenta propia para la tablet: en **Usuarios** crea un usuario con rol **Verificador de precios** (no pide cambiar contraseña y su sesión no vence).
 2. Entra con ese usuario en la tablet. La pantalla queda fija con un solo botón: **Verificar un precio**. Al tocarlo se abre la cámara frontal; el cliente acerca el código y ve el nombre, el precio (y el de mayoreo) en grande.
    - También sirve un lector USB o Bluetooth.
    - Funciona sin internet con los precios guardados.
-3. No se puede salir con el botón Atrás. El botón discreto **⋯** (esquina inferior derecha) pide usuario y contraseña de un colaborador. Ahí se puede actualizar precios o cerrar la sesión.
+3. Al entrar se elige un **código de bloqueo** (4 a 8 números). En la pantalla solo quedan el botón **Verificar un precio** y un candado pequeño 🔒. No se sale con Atrás ni recargando; solo con el candado y el código. Ahí se puede actualizar precios, cambiar el código o salir. Si olvidan el código, un administrador desbloquea con su usuario y contraseña (opción "¿Olvidaste el código?").
 4. Para que tampoco puedan salir de Chrome, activa en Android **Fijar aplicación** (Ajustes > Seguridad > Fijar aplicación) y fija la app instalada.
 
 La cámara usa el lector del propio Chrome en Android. En iPhone se descarga un lector de internet la primera vez.
