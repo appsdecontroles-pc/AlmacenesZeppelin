@@ -813,3 +813,11 @@ body.kiosco { user-select: none; -webkit-user-select: none; overscroll-behavior:
 .vp-prod img { width: 120px; height: 120px; object-fit: contain; border-radius: 10px; }
 .vp-prod h3 { margin: 0; }
 @media print { .burbuja-precio { display: none !important; } }
+.vf-candado { position: absolute; right: 12px; bottom: 12px; width: 42px; height: 42px; border-radius: 50%; border: 1px solid var(--borde);
+  background: var(--panel); font-size: 1.1rem; opacity: .5; cursor: pointer; }
+.verif-bloqueo { max-width: 520px; text-align: left; }
+.verif-bloqueo .verif-marca { font-size: 1.2rem; }
+.vf-ico { font-size: 2rem; }
+.vf-olvido { margin-top: 10px; }
+.vf-olvido summary { cursor: pointer; color: var(--suave); font-size: .85rem; }
+.verif-res { cursor: pointer; }

@@ -5,7 +5,7 @@
 
 const CFG = Object.assign({ NOMBRE: 'Control de Inventario', SYNC_MINUTOS: 15, API_URL: '' }, window.APP_CONFIG || {});
 CFG.NOMBRE_ORIGINAL = CFG.NOMBRE;
-const VERSION_APP = '5.7.3';
+const VERSION_APP = '5.7.5';
 
 const ROL_TXT = {
   ADMIN_GENERAL: 'Administrador general',
@@ -17,7 +17,9 @@ const ROL_TXT = {
 };
 const HORARIOS_ENTREGA = ['09:00-11:00', '11:00-13:00', '13:00-15:00', '15:00-17:00', '17:00-19:00', '19:00-21:00'];
 const entregaTxt = p => [p.horario_entrega ? p.horario_entrega.replace('-', ' a ') : '', p.modalidad === 'RECOGER' ? 'recoge en tienda' : p.modalidad === 'DOMICILIO' ? 'a domicilio' : ''].filter(Boolean).join(' · ');
-const vistaInicial = () => ({ CAJERO: 'caja', VERIFICADOR: 'verificador' })[rol()] || 'inicio';
+// Si el equipo quedó como verificador de precios, al recargar vuelve a esa pantalla
+const kioscoGuardado = () => { try { return localStorage.getItem('kiosco_verificador') === '1'; } catch (e) { return false; } };
+const vistaInicial = () => (kioscoGuardado() && VISTAS.verificador.roles.includes(rol()) ? 'verificador' : ({ CAJERO: 'caja', VERIFICADOR: 'verificador' })[rol()] || 'inicio');
 const TIPO_TXT = {
   ENTRADA: 'Entrada', SALIDA: 'Salida', AJUSTE: 'Ajuste por conteo', TRASPASO: 'Traspaso',
   TRASPASO_SALIDA: 'Traspaso (sale)', TRASPASO_ENTRADA: 'Traspaso (llega)',
@@ -502,7 +504,7 @@ const VISTAS = {
   tienda: { titulo: 'Hacer pedido', roles: ['CLIENTE'], render: vTienda },
   entienda: { titulo: 'Comprar en tienda', roles: ['CLIENTE'], render: vEnTienda },
   avisos: { titulo: 'Avisos', roles: ['CLIENTE'], render: vAvisos },
-  verificador: { titulo: 'Verificador de precios', roles: ['VERIFICADOR'], render: vVerificador },
+  verificador: { titulo: 'Verificador de precios', roles: ['VERIFICADOR', 'ADMIN_GENERAL', 'ADMIN_SUCURSAL', 'INVENTARIOS', 'CAJERO'], render: vVerificador },
   mispedidos: { titulo: 'Mis pedidos', roles: ['CLIENTE'], render: vMisPedidos },
   estado: { titulo: 'Estado de cuenta', roles: ['CLIENTE'], render: vEstadoCuenta },
   cuenta: { titulo: 'Mi cuenta', roles: null, render: vCuenta }
@@ -523,7 +525,7 @@ function mostrarLogin(usuario = '', msg = '') {
 }
 
 function mostrarApp() {
-  bloquearKiosco(rol() === 'VERIFICADOR');
+  bloquearKiosco(rol() === 'VERIFICADOR' || S.vista === 'verificador');
   setTimeout(actualizarBurbujaPrecio, 0);
   $('#pantalla-login').hidden = true;
   $('#pantalla-publica').hidden = true;
@@ -535,7 +537,7 @@ function mostrarApp() {
 
 // Menú agrupado por áreas; cada entrada es [vista, título, pestaña opcional]
 const GRUPOS_MENU = [
-  ['Vender', [['caja', 'Caja'], ['ventas', 'Ventas y cortes', 'ventas'], ['ventas', 'Clientes', 'clientes'], ['ventas', 'Por cobrar', 'cobrar'], ['pedidos', 'Pedidos']]],
+  ['Vender', [['caja', 'Caja'], ['ventas', 'Ventas y cortes', 'ventas'], ['ventas', 'Clientes', 'clientes'], ['ventas', 'Por cobrar', 'cobrar'], ['pedidos', 'Pedidos'], ['verificador', 'Verificador de precios']]],
   ['Inventario', [['productos', 'Productos'], ['inventario', 'Inventario'], ['movimientos', 'Movimientos'], ['analisis', 'Análisis y temporadas'], ['almacenes', 'Almacenes']]],
   ['Compras', [['compras', 'Compras y proveedores'], ['pagar', 'Por pagar']]],
   ['Personal', [['personal', 'Personal y nómina'], ['checador', 'Checador']]],
@@ -7120,6 +7122,8 @@ function pintarCodigoAutocobro(el) {
 const VF = { cam: null, t: null, salida: false };
 function bloquearKiosco(activar) {
   document.body.classList.toggle('kiosco', activar);
+  try { if (activar && rol() !== 'VERIFICADOR') localStorage.setItem('kiosco_verificador', '1'); else if (!activar) localStorage.removeItem('kiosco_verificador'); } catch (e) { /* sin almacenamiento */ }
+  actualizarBurbujaPrecio();
   if (activar && !VF.trampa) {
     VF.trampa = () => { if (document.body.classList.contains('kiosco')) history.pushState({ kiosco: 1 }, ''); };
     history.pushState({ kiosco: 1 }, '');
@@ -7128,7 +7132,17 @@ function bloquearKiosco(activar) {
   }
 }
 
+// Código de bloqueo del verificador (se guarda solo en este equipo, cifrado)
+const VF_CLAVE = 'kiosco_codigo';
+const leerCodigoKiosco = () => { try { return JSON.parse(localStorage.getItem(VF_CLAVE) || 'null'); } catch (e) { return null; } };
+async function guardarCodigoKiosco(codigo) {
+  const salt = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(16))));
+  localStorage.setItem(VF_CLAVE, JSON.stringify({ salt, hash: await derivar(codigo, salt) }));
+}
+const quitarCodigoKiosco = () => { try { localStorage.removeItem(VF_CLAVE); } catch (e) { /* nada */ } };
+
 function vVerificador(el) {
+  if (!leerCodigoKiosco()) return pintarBloqueoVerificador(el);
   bloquearKiosco(true);
   const emp = CFG.NOMBRE;
   el.innerHTML = `<div class="verif">
@@ -7140,7 +7154,7 @@ function vVerificador(el) {
     <div id="vf-cam" class="verif-cam" hidden></div>
     <div id="vf-res" class="verif-res" hidden></div>
     <input id="vf-scan" class="vf-oculto" inputmode="none" autocomplete="off" aria-hidden="true" tabindex="-1">
-    <button type="button" class="vf-salir" id="vf-salir" aria-label="Opciones para colaboradores">⋯</button>
+    <button type="button" class="vf-candado" id="vf-candado" aria-label="Desbloquear (solo personal)">🔒</button>
   </div>`;
   const ini = $('#vf-inicio', el), cam = $('#vf-cam', el), res = $('#vf-res', el), scan = $('#vf-scan', el);
   const reiniciar = () => {
@@ -7149,6 +7163,7 @@ function vVerificador(el) {
     cam.hidden = true; cam.innerHTML = ''; res.hidden = true; res.innerHTML = ''; ini.hidden = false;
     if (!VF.salida) scan.focus({ preventScroll: true });
   };
+  VF.reiniciar = reiniciar;
   const mostrar = cod => {
     if (VF.cam) { VF.cam.detener(); VF.cam = null; }
     cam.hidden = true; ini.hidden = true; res.hidden = false;
@@ -7158,12 +7173,9 @@ function vVerificador(el) {
         <div><h2>${esc(p.nombre)}</h2>${p.descripcion ? `<p>${esc(p.descripcion)}</p>` : ''}
           <p class="verif-precio">${dinero(p.precio_menudeo)}</p>
           ${Number(p.precio_mayoreo) > 0 && Number(p.precio_mayoreo) < Number(p.precio_menudeo) ? `<p class="verif-mayoreo">Mayoreo: ${dinero(p.precio_mayoreo)}</p>` : ''}
-          <small>${esc(p.unidad || '')}${p.codigo_barras ? ' · ' + esc(p.codigo_barras) : ''}</small></div></div>
-        <button type="button" class="btn sec" id="vf-otro">Verificar otro</button>`
+          <small>${esc(p.unidad || '')}${p.codigo_barras ? ' · ' + esc(p.codigo_barras) : ''}</small></div></div>`
       : `<div class="verif-no"><h2>No encontramos este producto</h2><p>Pide ayuda a un colaborador.</p><small>${esc(cod)}</small></div>`;
     if (p && p.imagen) cargarImgs(res);
-    const b = $('#vf-otro', res);
-    if (b) b.onclick = abrir;
     VF.t = setTimeout(reiniciar, p ? 9000 : 5000);
   };
   const abrir = async () => {
@@ -7171,61 +7183,118 @@ function vVerificador(el) {
     try { if (!document.fullscreenElement && document.documentElement.requestFullscreen) await document.documentElement.requestFullscreen(); } catch (e) { /* sin pantalla completa */ }
     res.hidden = true; ini.hidden = true; cam.hidden = false;
     VF.cam = await abrirCamara(cam, { frontal: true, alLeer: mostrar, alError: () => { VF.t = setTimeout(reiniciar, 6000); } });
-    cam.insertAdjacentHTML('beforeend', '<button type="button" class="btn sec" id="vf-cancelar">Cancelar</button>');
-    $('#vf-cancelar', cam).onclick = reiniciar;
-    VF.t = setTimeout(reiniciar, 25000);
+    VF.t = setTimeout(reiniciar, 25000);   // si nadie acerca un producto, vuelve solo al inicio
   };
   $('#vf-btn', el).onclick = abrir;
+  // Tocar el resultado vuelve al botón de inmediato
+  res.onclick = reiniciar;
   // Lector USB o Bluetooth (teclado): escribe el código y Enter
   scan.onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); const v = scan.value.trim(); scan.value = ''; if (v) mostrar(v); } };
   el.onclick = e => { if (!e.target.closest('button,input') && !VF.salida) scan.focus({ preventScroll: true }); };
-  $('#vf-salir', el).onclick = () => dlgSalirVerificador(reiniciar);
+  $('#vf-candado', el).onclick = () => dlgDesbloquearVerificador(reiniciar);
   S.refrescar = null;
   reiniciar();
 }
 
-function dlgSalirVerificador(alVolver) {
-  VF.salida = true;
-  const d = abrirModal('Solo colaboradores', `<form id="fvs" class="form" autocomplete="off">
-    <p class="nota">Escribe tu usuario y contraseña de colaborador para salir del verificador.</p>
-    <label>Usuario<input name="usuario" required autocapitalize="none" autocomplete="off"></label>
-    <label>Contraseña<input name="password" type="password" required autocomplete="off"></label>
-    <p class="msg" id="fvs-msg"></p>
-    <div class="pie"><button type="button" class="btn sec" data-cerrar>Volver</button><button class="btn" type="submit">Continuar</button></div></form>`);
-  const vigilar = setInterval(() => { if (!d.open) { clearInterval(vigilar); VF.salida = false; alVolver(); } }, 400);
-  const cerrarAuto = setTimeout(() => { if (d.open) cerrarModal(); }, 60000);
-  $('#fvs', d).onsubmit = async ev => {
+// Antes de empezar: se elige el código que bloquea la pantalla
+function pintarBloqueoVerificador(el) {
+  const cuenta = rol() === 'VERIFICADOR';
+  if (cuenta) bloquearKiosco(true);
+  el.innerHTML = `<div class="verif"><form id="vfb" class="panel form verif-bloqueo" autocomplete="off">
+    <div class="verif-marca"><span class="vf-ico">🔒</span><b>Bloquear el verificador de precios</b></div>
+    <p class="nota">Elige un código numérico. La pantalla quedará fija en el verificador y solo se podrá salir con este código, desde el candado.</p>
+    <div class="fila2"><label>Código (4 a 8 números)<input name="c1" type="password" inputmode="numeric" pattern="[0-9]*" minlength="4" maxlength="8" required></label>
+      <label>Repite el código<input name="c2" type="password" inputmode="numeric" pattern="[0-9]*" minlength="4" maxlength="8" required></label></div>
+    <p class="msg" id="vfb-msg"></p>
+    <div class="pie">${cuenta ? '' : '<button type="button" class="btn sec" id="vfb-no">Cancelar</button>'}<button class="btn" type="submit">🔒 Bloquear y empezar</button></div>
+  </form></div>`;
+  const f = $('#vfb', el);
+  f.c1.focus();
+  const no = $('#vfb-no', el);
+  if (no) no.onclick = () => irA('inicio');
+  f.onsubmit = async ev => {
     ev.preventDefault();
-    const usuario = ev.target.usuario.value.trim().toLowerCase(), password = ev.target.password.value;
-    const msg = $('#fvs-msg', d);
-    let nombre = '';
-    try {
-      nombre = (await conCarga('Verificando…', () => api('validarColaborador', { usuario, password }))).nombre;
-    } catch (e) {
-      if (!e.red) { msg.textContent = e.message; ev.target.password.value = ''; return; }
-      const cred = await DB.get('cred:' + usuario);   // sin internet: colaborador que ya entró en este equipo
-      if (!cred || ['CLIENTE', 'VERIFICADOR'].includes(cred.usuario.rol) || await derivar(password, cred.salt) !== cred.hash) {
-        msg.textContent = 'Usuario o contraseña incorrectos (sin internet solo sirven colaboradores que ya entraron en este equipo).';
-        return;
-      }
-      nombre = cred.usuario.nombre;
-    }
+    const a = f.c1.value.trim(), b = f.c2.value.trim();
+    if (!/^\d{4,8}$/.test(a)) { $('#vfb-msg', el).textContent = 'El código debe tener de 4 a 8 números.'; return; }
+    if (a !== b) { $('#vfb-msg', el).textContent = 'Los códigos no coinciden.'; f.c2.value = ''; f.c2.focus(); return; }
+    await guardarCodigoKiosco(a);
+    vVerificador(el);
+  };
+  S.refrescar = null;
+}
+
+function dlgDesbloquearVerificador(alVolver) {
+  VF.salida = true;
+  const d = abrirModal('🔒 Desbloquear', `<form id="fvs" class="form" autocomplete="off">
+    <label>Código de bloqueo<input name="codigo" type="password" inputmode="numeric" maxlength="8" required autofocus></label>
+    <p class="msg" id="fvs-msg"></p>
+    <div class="pie"><button type="button" class="btn sec" data-cerrar>Volver</button><button class="btn" type="submit">Desbloquear</button></div>
+    <details class="vf-olvido"><summary>¿Olvidaste el código?</summary>
+      <p class="nota">Un administrador puede desbloquear con su usuario y contraseña.</p>
+      <div class="fila2"><input name="usuario" placeholder="Usuario" autocapitalize="none"><input name="password" type="password" placeholder="Contraseña"></div>
+      <button type="button" class="btn sec mini" id="fvs-admin">Desbloquear como administrador</button></details>
+  </form>`);
+  const vigilar = setInterval(() => { if (!d.open) { clearInterval(vigilar); VF.salida = false; alVolver(); } }, 400);
+  const cerrarAuto = setTimeout(() => { if (d.open) cerrarModal(); }, 45000);
+  const f = $('#fvs', d), msg = $('#fvs-msg', d);
+  VF.fallos = VF.fallos || 0;
+  const opciones = () => {
     clearTimeout(cerrarAuto);
-    $('#fvs', d).outerHTML = `<div class="form"><p>Hola, <b>${esc(nombre)}</b>. ¿Qué quieres hacer?</p>
+    VF.fallos = 0;
+    f.outerHTML = `<div class="form"><p>Pantalla desbloqueada.</p>
       <div class="pie pie-col"><button type="button" class="btn sec" id="vs-act">Actualizar precios ahora</button>
-        <button type="button" class="btn peligro" id="vs-salir">Cerrar sesión del verificador</button><button type="button" class="btn" data-cerrar>Volver al verificador</button></div></div>`;
-    $('#vs-act', d).onclick = async () => { await sincronizar(true); };
-    $('#vs-salir', d).onclick = async () => {
+        <button type="button" class="btn sec" id="vs-codigo">Cambiar el código</button>
+        ${rol() === 'VERIFICADOR' ? '<button type="button" class="btn peligro" id="vs-salir">Cerrar sesión del verificador</button>'
+          : '<button type="button" class="btn peligro" id="vs-app">Salir del verificador y volver a la app</button>'}
+        <button type="button" class="btn" data-cerrar>Volver a bloquear</button></div></div>`;
+    $('#vs-act', d).onclick = async () => { await sincronizar(true); toast('Precios actualizados.', 'ok'); };
+    $('#vs-codigo', d).onclick = () => { clearInterval(vigilar); VF.salida = false; quitarCodigoKiosco(); cerrarModal(); if (VF.cam) { VF.cam.detener(); VF.cam = null; } pintarBloqueoVerificador($('#vista')); };
+    const salirKiosco = async () => {
       clearInterval(vigilar); VF.salida = false;
+      if (VF.cam) { VF.cam.detener(); VF.cam = null; }
+      quitarCodigoKiosco();
       bloquearKiosco(false);
       try { if (document.fullscreenElement) await document.exitFullscreen(); } catch (e) { /* nada */ }
+      cerrarModal();
+    };
+    const bapp = $('#vs-app', d);
+    if (bapp) bapp.onclick = async () => { await salirKiosco(); irA('inicio'); };
+    const bsal = $('#vs-salir', d);
+    if (bsal) bsal.onclick = async () => {
+      await salirKiosco();
       if (S.online) api('logout').catch(() => {});
       await DB.del('sesion');
       const u = S.usuario.usuario;
       S.usuario = null; S.token = '';
-      cerrarModal();
       mostrarLogin(u);
     };
+  };
+  f.onsubmit = async ev => {
+    ev.preventDefault();
+    if (VF.bloqueoHasta && Date.now() < VF.bloqueoHasta) { msg.textContent = 'Demasiados intentos. Espera un minuto.'; return; }
+    const k = leerCodigoKiosco();
+    if (k && await derivar(f.codigo.value.trim(), k.salt) === k.hash) { opciones(); return; }
+    VF.fallos++;
+    if (VF.fallos >= 5) { VF.bloqueoHasta = Date.now() + 60000; VF.fallos = 0; }
+    msg.textContent = 'Código incorrecto.';
+    f.codigo.value = ''; f.codigo.focus();
+  };
+  $('#fvs-admin', d).onclick = async () => {
+    const usuario = f.usuario.value.trim().toLowerCase(), password = f.password.value;
+    if (!usuario || !password) { msg.textContent = 'Escribe usuario y contraseña.'; return; }
+    let rolCol = '';
+    try {
+      await conCarga('Verificando…', () => api('validarColaborador', { usuario, password }));
+      const cred = await DB.get('cred:' + usuario);
+      rolCol = cred ? cred.usuario.rol : 'ADMIN';
+    } catch (e) {
+      if (!e.red) { msg.textContent = e.message; return; }
+      const cred = await DB.get('cred:' + usuario);
+      if (!cred || await derivar(password, cred.salt) !== cred.hash) { msg.textContent = 'Usuario o contraseña incorrectos.'; return; }
+      rolCol = cred.usuario.rol;
+    }
+    if (['CAJERO', 'CLIENTE', 'VERIFICADOR'].includes(rolCol)) { msg.textContent = 'Solo un administrador puede desbloquear sin el código.'; return; }
+    opciones();
   };
 }
 
@@ -7530,7 +7599,7 @@ async function vAvisos(el) {
 
 /* ---------------- Burbuja "Verificar precio" para el personal ---------------- */
 const BP = { t: null };
-const burbujaPrecioVisible = () => S.usuario && !['CLIENTE', 'VERIFICADOR'].includes(rol()) && !['caja', 'checador'].includes(S.vista)
+const burbujaPrecioVisible = () => S.usuario && !['CLIENTE', 'VERIFICADOR'].includes(rol()) && !['caja', 'checador', 'verificador'].includes(S.vista)
   && !$('#pantalla-app').hidden && !(BP.oculta);
 function iniciarBurbujaPrecio() {
   if ($('#burbuja-precio')) return;
