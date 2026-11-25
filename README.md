@@ -242,6 +242,150 @@ Las ventanas (cobro, producto, impresora, corte, apariencia, etc.) nunca son má
 - En laptops y tablets usan un modo compacto.
 - Si algo no cabe (por ejemplo en celular), solo se desplaza el contenido y los botones de Confirmar o Guardar quedan siempre visibles abajo.
 
+## Actualizar a la versión 5.7.1 (Personal, bonos, Análisis, portal público, autocobro, verificador y avisos al cliente)
+
+1. Pega el nuevo `Codigo-gs.html` en Apps Script y guarda.
+2. Ejecuta otra vez la función **instalar**. Crea las hojas nuevas (Empleados, Horarios, Asistencias, Incidencias, Adelantos, Vacaciones, Nominas, Temporadas, Bonos, Autocobros, Notificaciones) y las columnas nuevas. No borra nada.
+3. **Implementar > Administrar implementaciones > lápiz > Nueva versión**.
+4. Sube los archivos de la app (sin tocar tu `config.js`) y abre la app dos veces para que tome la versión nueva.
+5. En **Personal > Horarios y reglas**, revisa que la zona horaria sea **Mazatlan (Sinaloa…)**. De ella dependen las horas de checada, los cortes y los reportes.
+
+## Personal y nómina
+
+Menú **Personal** (administrador general y de sucursal; cada sucursal ve solo a su gente).
+
+- **Horarios y reglas:** horario de entrada y salida, días de trabajo, minutos de tolerancia (a tiempo) y minutos después de los cuales la llegada cuenta como falta. Entre ambos es **retardo**.
+- **Reglas de pago** (solo el administrador general):
+  - tope de adelanto (20 %, 30 %, 50 %… del sueldo del periodo), cuántos adelantos por periodo y días mínimos de trabajo para pedirlo;
+  - prima vacacional (25 % por ley);
+  - descuento por cada retardo y cuántos retardos equivalen a una falta;
+  - los bonos ya no están aquí: son opcionales y se arman en la pestaña **Bonos**.
+- **Empleados:** número, sucursal, área (Caja, Almacén…), fecha de ingreso, pago diario, semanal o quincenal, salario diario, horario, NIP y su usuario de caja (para bonos por sus ventas).
+  - **No usa checador:** cobra su salario fijo completo y no aparece con faltas ni retardos.
+- **Cómo se paga:**
+  - Diario: solo los días trabajados (más vacaciones y permisos).
+  - Semanal o quincenal: salario fijo de todos los días del periodo, incluido el descanso semanal; las faltas se descuentan.
+- **Asistencia:** tabla de la quincena por sucursal, persona y día.
+  - Colores: verde a tiempo, rojo retardo (con minutos), rojo oscuro falta, gris descanso, azul vacaciones, amarillo permiso, morado incapacidad.
+  - Al final de cada fila: salario fijo, descuentos, bonos y prima, y salario final.
+  - Toca un día para justificarlo o corregir horas. Toca un nombre para ver el desglose y agregar bonos o descuentos.
+- **Nómina:** por tipo de pago y periodo.
+  - **Cerrar nómina** fija los importes y marca los adelantos como descontados.
+  - Después marca quién ya cobró, imprime recibos para firma o exporta a Excel.
+  - Se puede reabrir mientras no haya pagos marcados.
+- **Solicitudes:** aprobar o rechazar vacaciones y adelantos, o registrarlos a nombre del empleado.
+  - Los días de vacaciones siguen la ley (reforma 2023): 12 el primer año, +2 por año hasta 20, luego +2 cada 5 años.
+  - Las vacaciones aprobadas se pagan con prima vacacional.
+
+## Checador
+
+Menú **Checador**, en cualquier equipo de la sucursal (también los cajeros). El empleado escribe su número y su NIP en el teclado de la pantalla. Después puede:
+
+- registrar su entrada o salida (mensaje verde si llegó a tiempo, rojo si llegó tarde);
+- ver su quincena en colores;
+- pedir vacaciones, con los días que le quedan;
+- pedir un adelanto, con el máximo permitido.
+
+Notas:
+- Tras 5 NIP equivocados, ese número se bloquea 10 minutos.
+- Sin internet, la checada se guarda en el equipo con su hora real y se envía sola al volver la conexión (hasta 48 horas).
+
+## Análisis y temporadas
+
+Menú **Análisis** (administradores y control de inventarios).
+
+- **Más vendidos:** top 50 por piezas o por importe en el periodo que elijas, con opción de ordenarlo por categoría, y el top 10 de cada categoría.
+- **Rotación y sugerencias:** cada producto tiene su clase A, B o C según lo que vende y estas señales:
+  - **Tener más:** se vende bien y alcanza para menos de 15 días.
+  - **Promocionar ya:** caduca en menos de 1 mes y lleva más de 2 meses en inventario (descuento, regalo o degustación).
+  - **Sin ventas en 2 meses:** propuesta para retirar.
+  - **Demasiado inventario:** hay para más de 4 meses.
+  - **No aguanta a su temporada:** producto de temporada que caduca antes de la siguiente.
+  - Selecciona productos para marcarlos **descontinuados** (ya no se sugieren en compras) o **de temporada**.
+- **Temporadas:** Navidad, 14 de febrero, Semana Santa (se calcula sola), etc.
+  - Cada una avisa 1, 2 o 3 meses antes, en el Inicio y por correo a la empresa.
+  - El detalle muestra lo vendido la temporada anterior y la de hace dos años, la existencia actual, cuánto tener (con el % de crecimiento) y cuánto comprar.
+  - Incluye ideas automáticas y tus propuestas de productos nuevos, dinámicas y promociones.
+  - El botón **Orden de compra con lo sugerido** arma la orden.
+- **Productos de temporada:** se destacan en su temporada y no se marcan "sin ventas" el resto del año, pero sí avisan si caducan antes de la siguiente.
+
+## Caducidad
+
+- Al registrar una **Entrada** o al **recibir una orden de compra** puedes capturar la caducidad del lote.
+- En la ficha del producto también puedes poner la caducidad del inventario actual.
+- El análisis toma la más próxima.
+
+## Bonos (opcionales)
+
+En **Personal > Bonos** creas los que quieras. Cada bono tiene:
+
+- **Tipo:**
+  - Puntualidad: llegar a tiempo, sin faltas ni retardos. No aplica a quien no usa checador.
+  - Meta de ventas: monto de venta a alcanzar.
+  - Promover un producto: meta en piezas o en $ vendido de ese producto.
+- **Cuenta la venta de:** la sucursal completa, o cada persona (lo que cobró con su usuario de caja).
+- **Monto:** a cada persona que cumple, o repartido entre quienes cumplen.
+- **Se mide y se paga:** por día, por semana o por quincena. Se paga en la nómina donde termina ese periodo.
+- **Aplica a:** una persona, un grupo de personas, todos los presentes o un turno completo (horario).
+- **Sucursal y área:** una o todas. Con "todas las sucursales", cada sucursal tiene que llegar a su meta.
+- **Solo participan:** quienes no faltaron, quienes no tuvieron retardos, quienes tienen al menos X meses, o todas las anteriores.
+- **Vigencia** opcional (por ejemplo, una promoción de dos semanas).
+
+En la misma pestaña ves el avance de cada meta en barras y cuánto lleva ganado cada quien. En el checador, cada empleado ve su avance.
+
+## Pedidos de clientes con día y horario
+
+- **Sin cuenta:** el cliente abre la app y toca **Hacer un pedido sin cuenta**, o entra directo con la dirección terminada en `#pedir` (por ejemplo `https://appsdecontroles-pc.github.io/AlmacenesZeppelin/#pedir`). Ponla en un código QR, en WhatsApp o en redes.
+  - Solo deja su nombre, teléfono y dirección (o la tienda donde recoge), el día y el horario.
+  - **Paga al recibir o al recoger.** El pedido llega a Pedidos como cualquier otro, con sus datos en las notas.
+- **Con cuenta:** con **Crear mi cuenta de cliente** (o `#registro`) elige usuario y contraseña, sin confirmar nada. Guarda sus datos y sus pedidos anteriores (si ya pidió sin cuenta con ese teléfono, los ve).
+- **Crédito:** lo da el negocio en Ventas > Clientes (límite y días).
+  - Sin crédito, el cliente no elige forma de pago: solo programa la entrega o la recolección.
+  - Con crédito, ve en todo momento su saldo, su crédito disponible y cuándo vence cada pedido. Cada pedido vence a los días de crédito contados desde el día en que lo pidió (30 días naturales: un pedido del 15 de mayo vence el 14 de junio).
+  - Una semana antes ve el aviso de "por vencer". Si tiene algo vencido, ya no puede pedir a crédito, solo pagando al recibir.
+- **Horario de entregas:** en **Datos de la empresa** pones la hora de inicio y la de fin. El cliente elige una franja de 2 horas dentro de ese horario (por ejemplo, de 8:00 a 15:00 salen 8–10, 10–12, 12–14 y 14–15).
+- Para ocultar los botones públicos en la pantalla de entrada, agrega `PORTAL_PUBLICO: false` en `config.js`.
+
+## Avisos al cliente
+
+El cliente recibe un aviso cuando:
+- se recibe su pedido;
+- queda programado (con día y horario);
+- va en camino;
+- se entrega;
+- se cancela;
+- se cobra su autocobro;
+- le autorizan o cambian el crédito;
+- un pago está por vencer o ya venció.
+
+Cómo le llega:
+
+- **En su portal:** menú **Avisos**, con burbuja de no leídos y el último aviso en el Inicio.
+- **Como notificación del teléfono:** si toca **🔔 Avísame en este teléfono** y lo permite. Llega cuando abre la app o mientras la tiene abierta en segundo plano; con la app cerrada por completo no llega hasta que la vuelve a abrir.
+- **Por correo:** si registró su correo.
+- **Sin cuenta:** al volver a abrir la página `#pedir` en su teléfono ve el estado y los avisos de sus pedidos.
+- **WhatsApp:** en el detalle de cada pedido hay un botón **WhatsApp** que abre el chat del cliente con un mensaje listo según cómo va su pedido.
+
+## Autocobro (el cliente escanea con su teléfono)
+
+1. El cliente con cuenta toca **Estoy en la tienda**, elige la sucursal y escanea los productos con la cámara de su teléfono (o los busca). Ve sus precios y el total.
+2. Al terminar toca **Terminar y pagar en caja**. Recibe un código de barras **AC 123 456**, que vale solo ese día.
+3. En la **Caja**, la cajera escanea ese código con el lector (o lo escribe en el buscador, o usa el botón **Autocobro**). Se abre una cuenta con los productos y el cliente.
+4. La cajera revisa la mercancía y cobra normal. La venta entra al corte de esa caja como cualquier otra, el autocobro queda marcado como cobrado con el folio del ticket y al cliente le llega el aviso.
+
+También puede **verificar un precio** sin agregarlo.
+
+## Verificador de precios (tablet en la pared)
+
+1. En **Usuarios**, crea un usuario con rol **Verificador de precios** (no se le pide cambiar contraseña y su sesión no vence).
+2. Entra con ese usuario en la tablet. La pantalla queda fija con un solo botón: **Verificar un precio**. Al tocarlo se abre la cámara frontal; el cliente acerca el código y ve el nombre, el precio (y el de mayoreo) en grande.
+   - También sirve un lector USB o Bluetooth.
+   - Funciona sin internet con los precios guardados.
+3. No se puede salir con el botón Atrás. El botón discreto **⋯** (esquina inferior derecha) pide usuario y contraseña de un colaborador. Ahí se puede actualizar precios o cerrar la sesión.
+4. Para que tampoco puedan salir de Chrome, activa en Android **Fijar aplicación** (Ajustes > Seguridad > Fijar aplicación) y fija la app instalada.
+
+La cámara usa el lector del propio Chrome en Android. En iPhone se descarga un lector de internet la primera vez.
+
 ## Cómo funciona sin internet
 
 - Al entrar y cada 15 minutos, la app descarga catálogo, precios y existencias, y los guarda en el equipo.
@@ -257,5 +401,6 @@ Las ventanas (cobro, producto, impresora, corte, apariencia, etc.) nunca son má
 | Administrador general | Todo, en todos los almacenes |
 | Administrador de sucursal | Ver su sucursal, registrar movimientos, crear cajeros y personal de inventarios, pedir y surtir traspasos con otras sucursales |
 | Control de inventarios | Editar catálogo y registrar movimientos en su almacén |
-| Cajero | Vender, consultar productos y existencias (sin costos), ver dónde hay un producto y pedir traspasos |
-| Cliente | Portal: hacer pedidos, ver sus pedidos y su estado de cuenta |
+| Cajero | Vender, consultar productos y existencias (sin costos), ver dónde hay un producto, pedir traspasos y usar el checador |
+| Cliente | Portal: hacer pedidos con día y horario, comprar en tienda con autocobro, ver sus pedidos, su crédito y sus vencimientos |
+| Verificador de precios | Solo la pantalla de verificar precios (tablet fija) |

@@ -5,15 +5,19 @@
 
 const CFG = Object.assign({ NOMBRE: 'Control de Inventario', SYNC_MINUTOS: 15, API_URL: '' }, window.APP_CONFIG || {});
 CFG.NOMBRE_ORIGINAL = CFG.NOMBRE;
-const VERSION_APP = '5.5.0';
+const VERSION_APP = '5.7.2';
 
 const ROL_TXT = {
   ADMIN_GENERAL: 'Administrador general',
   ADMIN_SUCURSAL: 'Administrador de sucursal',
   INVENTARIOS: 'Control de inventarios',
   CAJERO: 'Cajero',
-  CLIENTE: 'Cliente'
+  CLIENTE: 'Cliente',
+  VERIFICADOR: 'Verificador de precios (tablet fija)'
 };
+const HORARIOS_ENTREGA = ['09:00-11:00', '11:00-13:00', '13:00-15:00', '15:00-17:00', '17:00-19:00', '19:00-21:00'];
+const entregaTxt = p => [p.horario_entrega ? p.horario_entrega.replace('-', ' a ') : '', p.modalidad === 'RECOGER' ? 'recoge en tienda' : p.modalidad === 'DOMICILIO' ? 'a domicilio' : ''].filter(Boolean).join(' · ');
+const vistaInicial = () => ({ CAJERO: 'caja', VERIFICADOR: 'verificador' })[rol()] || 'inicio';
 const TIPO_TXT = {
   ENTRADA: 'Entrada', SALIDA: 'Salida', AJUSTE: 'Ajuste por conteo', TRASPASO: 'Traspaso',
   TRASPASO_SALIDA: 'Traspaso (sale)', TRASPASO_ENTRADA: 'Traspaso (llega)',
@@ -264,7 +268,7 @@ function mapaExistencias() {
 
 /* ---------------- Sesión ---------------- */
 async function cargarSesion(ses) {
-  if (!S.usuario || S.usuario.usuario !== ses.usuario.usuario) { CMP.datos = null; CPP.datos = null; CJ.estado = null; VT.cli = null; VT.ventas = null; PD.datos = null; PT.datos = null; PT.carrito = null; }
+  if (!S.usuario || S.usuario.usuario !== ses.usuario.usuario) { CMP.datos = null; CPP.datos = null; PER.base = null; ANA.datos = null; ANA.temp = null; CJ.estado = null; VT.cli = null; VT.ventas = null; PD.datos = null; PT.datos = null; PT.carrito = null; }
   S.token = ses.token;
   S.usuario = ses.usuario;
   const [cat, ex, ver, rolCat, ult, out] = await Promise.all([
@@ -286,6 +290,11 @@ async function cargarSesion(ses) {
   S.cajasAbiertas = cj.abiertas || {};
   S.cliente = rol() === 'CLIENTE' ? (await DB.get('cliente')) || null : null;
   S.avisos = (await DB.get('avisos')) || null;
+  S.temporadasAviso = (await DB.get('temporadasAviso')) || [];
+  S.temporadasLista = (await DB.get('temporadasLista')) || [];
+  S.personalAvisos = (await DB.get('personalAvisos')) || null;
+  S.horariosEntrega = (await DB.get('horariosEntrega')) || null;
+  S.avisosCliente = (await DB.get('avisosCliente')) || null;
   indexar();
 }
 
@@ -318,7 +327,7 @@ async function onLogin(ev) {
     await DB.set('sesion', ses);
     f.password.value = '';
     await cargarSesion(ses);
-    S.vista = rol() === 'CAJERO' ? 'caja' : 'inicio';
+    S.vista = vistaInicial();
     mostrarApp();
     if (!ses.offline) {
       await sincronizar();
@@ -411,6 +420,7 @@ async function sincronizar(manual = false) {
   actualizarBarra();
   try {
     await enviarPendientes();
+    await enviarChecadas();
     const d = await api('sync', { version: S.version, rol: S.rolCatalogo });
     if (d.catalogo) {
       S.catalogo = d.catalogo;
@@ -430,6 +440,16 @@ async function sincronizar(manual = false) {
     await DB.set('alertas', S.alertas);
     S.avisos = d.avisos || null;
     await DB.set('avisos', S.avisos);
+    if (d.temporadas) { S.temporadasAviso = d.temporadas; await DB.set('temporadasAviso', S.temporadasAviso); }
+    if (d.temporadas_lista) { S.temporadasLista = d.temporadas_lista; await DB.set('temporadasLista', S.temporadasLista); }
+    S.personalAvisos = d.personal || null;
+    await DB.set('personalAvisos', S.personalAvisos);
+    if (d.horarios_entrega) { S.horariosEntrega = d.horarios_entrega; await DB.set('horariosEntrega', S.horariosEntrega); }
+    if (d.avisos_cliente) {
+      S.avisosCliente = d.avisos_cliente;
+      await DB.set('avisosCliente', S.avisosCliente);
+      notificarNuevos(d.avisos_cliente.nuevos, 'avisosVistos:' + d.usuario.usuario, './');
+    }
     if (d.cliente) { S.cliente = d.cliente; await DB.set('cliente', S.cliente); }
     if (d.clientes) {
       // Conserva el saldo local de lo que aún no se envía (ventas a crédito y abonos en cola)
@@ -474,9 +494,15 @@ const VISTAS = {
   pedidos: { titulo: 'Pedidos', roles: ['ADMIN_GENERAL', 'INVENTARIOS', 'ADMIN_SUCURSAL'], render: vPedidos },
   pagar: { titulo: 'Por pagar', roles: ['ADMIN_GENERAL'], render: vPagar },
   ventas: { titulo: 'Ventas', roles: ['ADMIN_GENERAL', 'ADMIN_SUCURSAL'], render: vVentas },
+  analisis: { titulo: 'Análisis', roles: ['ADMIN_GENERAL', 'ADMIN_SUCURSAL', 'INVENTARIOS'], render: vAnalisis },
+  personal: { titulo: 'Personal', roles: ['ADMIN_GENERAL', 'ADMIN_SUCURSAL'], render: vPersonal },
+  checador: { titulo: 'Checador', roles: ['ADMIN_GENERAL', 'ADMIN_SUCURSAL', 'INVENTARIOS', 'CAJERO'], render: vChecador },
   almacenes: { titulo: 'Almacenes', roles: ['ADMIN_GENERAL'], render: vAlmacenes },
   usuarios: { titulo: 'Usuarios', roles: ['ADMIN_GENERAL', 'ADMIN_SUCURSAL'], render: vUsuarios },
   tienda: { titulo: 'Hacer pedido', roles: ['CLIENTE'], render: vTienda },
+  entienda: { titulo: 'Comprar en tienda', roles: ['CLIENTE'], render: vEnTienda },
+  avisos: { titulo: 'Avisos', roles: ['CLIENTE'], render: vAvisos },
+  verificador: { titulo: 'Verificador de precios', roles: ['VERIFICADOR'], render: vVerificador },
   mispedidos: { titulo: 'Mis pedidos', roles: ['CLIENTE'], render: vMisPedidos },
   estado: { titulo: 'Estado de cuenta', roles: ['CLIENTE'], render: vEstadoCuenta },
   cuenta: { titulo: 'Mi cuenta', roles: null, render: vCuenta }
@@ -486,6 +512,7 @@ const puedeVer = k => !VISTAS[k].roles || VISTAS[k].roles.includes(rol());
 function mostrarLogin(usuario = '', msg = '') {
   $('#toasts').innerHTML = '';
   $('#pantalla-app').hidden = true;
+  $('#pantalla-publica').hidden = true;
   $('#pantalla-login').hidden = false;
   const f = $('#form-login');
   if (usuario) f.usuario.value = usuario;
@@ -495,7 +522,9 @@ function mostrarLogin(usuario = '', msg = '') {
 }
 
 function mostrarApp() {
+  bloquearKiosco(rol() === 'VERIFICADOR');
   $('#pantalla-login').hidden = true;
+  $('#pantalla-publica').hidden = true;
   $('#pantalla-app').hidden = false;
   pintarMenu();
   pintarVista();
@@ -506,7 +535,10 @@ function pintarMenu() {
   $('#menu').innerHTML = Object.keys(VISTAS).filter(puedeVer)
     .map(k => {
       const n = k === 'pagar' && S.alertas ? S.alertas.vencidas + S.alertas.por_vencer
-        : k === 'pedidos' && S.avisos ? S.avisos.solicitados + S.avisos.por_surtir + (rol() === 'ADMIN_SUCURSAL' ? S.avisos.en_ruta : 0) : 0;
+        : k === 'pedidos' && S.avisos ? S.avisos.solicitados + S.avisos.por_surtir + (rol() === 'ADMIN_SUCURSAL' ? S.avisos.en_ruta : 0)
+        : k === 'personal' && S.personalAvisos ? S.personalAvisos.vacaciones + S.personalAvisos.adelantos
+        : k === 'analisis' && S.temporadasAviso ? S.temporadasAviso.length
+        : k === 'avisos' && S.avisosCliente ? S.avisosCliente.no_leidos : 0;
       return `<button type="button" data-v="${k}" class="${S.vista === k ? 'activo' : ''}">${VISTAS[k].titulo}${n ? `<span class="burbuja ${k === 'pagar' && S.alertas.vencidas ? 'roja' : ''}">${n}</span>` : ''}</button>`;
     }).join('');
 }
@@ -520,7 +552,10 @@ function irA(k) {
 
 function pintarVista() {
   if (!S.usuario) return;
+  if (rol() === 'VERIFICADOR') S.vista = 'verificador';
   if (!puedeVer(S.vista)) S.vista = 'inicio';
+  if (AT.cam) { AT.cam.detener(); AT.cam = null; }
+  if (VF.cam && S.vista !== 'verificador') { VF.cam.detener(); VF.cam = null; }
   S.refrescar = null;
   VISTAS[S.vista].render($('#vista'));
 }
@@ -572,6 +607,10 @@ function vInicio(el) {
         <button type="button" class="tarjeta ${S.alertas.vencidas ? 'alerta-roja' : ''}" data-pagos="vencidas"><span>Pagos vencidos</span><b>${dinero(S.alertas.monto_vencido)}</b><small>${plural(S.alertas.vencidas, 'cuenta')}</small></button>
         <button type="button" class="tarjeta ${S.alertas.por_vencer ? 'alerta' : ''}" data-pagos="por_vencer"><span>Pagos que vencen en ${S.alertas.dias} días</span><b>${dinero(S.alertas.monto_por_vencer)}</b><small>${plural(S.alertas.por_vencer, 'cuenta')}</small></button>` : ''}
     </div>
+    ${VISTAS.analisis.roles.includes(rol()) && S.temporadasAviso && S.temporadasAviso.length ? `<div class="panel aviso-temp"><h3>Temporadas próximas</h3><ul class="lista">${S.temporadasAviso.map(t => `<li class="clic" data-ir-temp="${esc(t.id)}"><span><b>${esc(t.nombre)}</b>
+        <small>${t.en_temporada ? 'En temporada' : `Empieza el ${fechaCorta(t.inicio)} · faltan ${t.dias_faltan} días`}</small></span><span class="btn mini sec">Preparar</span></li>`).join('')}</ul></div>` : ''}
+    ${S.personalAvisos && (S.personalAvisos.vacaciones || S.personalAvisos.adelantos) ? `<div class="tarjetas"><button type="button" class="tarjeta alerta" id="t-pers"><span>Solicitudes del personal</span><b>${S.personalAvisos.vacaciones + S.personalAvisos.adelantos}</b>
+        <small>${S.personalAvisos.vacaciones} de vacaciones · ${plural(S.personalAvisos.adelantos, 'adelanto')}</small></button></div>` : ''}
     <div class="panel">
       <h3>Sincronización</h3>
       <p>${S.online ? 'Conectado al servidor.' : 'Sin conexión: trabajando con los datos guardados en este equipo.'}</p>
@@ -587,6 +626,9 @@ function vInicio(el) {
   $$('[data-pagos]', el).forEach(b => { b.onclick = () => { CPP.filtro = b.dataset.pagos; irA('pagar'); }; });
   $$('[data-ir-ped]', el).forEach(b => { b.onclick = () => irA('pedidos'); });
   $$('[data-ir-cob]', el).forEach(b => { b.onclick = () => { VT.pestana = 'cobrar'; irA('ventas'); }; });
+  $$('[data-ir-temp]', el).forEach(b => { b.onclick = () => { ANA.tab = 'temporadas'; ANA.temp = b.dataset.irTemp; irA('analisis'); }; });
+  const tp = $('#t-pers', el);
+  if (tp) tp.onclick = () => { PER.tab = 'solicitudes'; irA('personal'); };
   S.refrescar = () => vInicio(el);
 }
 
@@ -821,6 +863,12 @@ function dlgProducto(p, codigoBarras = '') {
         <label>Stock mínimo<input name="stock_minimo" type="number" step="any" min="0" value="${val(p.stock_minimo)}" ${ro}></label>
         <label class="chk"><input type="checkbox" name="activo" ${esActivo(p.activo) ? 'checked' : ''} ${ro}> Activo</label>
       </div>
+      <div class="fila3">
+        <label>Caducidad del inventario actual <small>(opcional)</small><input name="caducidad" type="date" value="${val(p.caducidad)}" ${ro}></label>
+        <label>Producto de temporada<select name="temporada_id" ${ro}><option value="">No es de temporada</option>${(S.temporadasLista || []).map(t => `<option value="${esc(t.id)}" ${p.temporada_id === t.id ? 'selected' : ''}>${esc(t.nombre)}</option>`).join('')}
+          ${p.temporada_id && !(S.temporadasLista || []).some(t => t.id === p.temporada_id) ? `<option value="${esc(p.temporada_id)}" selected>(temporada actual)</option>` : ''}</select></label>
+        <label class="chk"><input type="checkbox" name="descontinuado" ${esActivo(p.descontinuado || false) ? 'checked' : ''} ${ro}> Descontinuado (vender lo que queda y no volver a comprar)</label>
+      </div>
       </div>
       <div class="col">
       <div class="prod-media">
@@ -880,6 +928,9 @@ function dlgProducto(p, codigoBarras = '') {
       precio_menudeo: f.precio_menudeo.value,
       precio_mayoreo: f.precio_mayoreo.value,
       stock_minimo: f.stock_minimo.value,
+      caducidad: f.caducidad.value,
+      temporada_id: f.temporada_id.value,
+      descontinuado: f.descontinuado.checked,
       descripcion: f.descripcion.value.trim(),
       activo: f.activo.checked
     };
@@ -1487,6 +1538,7 @@ function vMovimientos(el) {
       <div class="fila3">
         <label><span id="txt-cant">Cantidad</span><input name="cantidad" type="number" step="any" min="0" inputmode="decimal"></label>
         <label id="lbl-costo">Costo unitario<input name="costo_unitario" type="number" step="0.01" min="0" placeholder="Costo actual"></label>
+        <label id="lbl-cad">Caduca <small>(opcional)</small><input name="caducidad" type="date"></label>
         <label>Referencia<input name="referencia" value="${esc(M.referencia || '')}" placeholder="Factura, remisión, folio…"></label>
       </div>
       <label>Notas<input name="notas"></label>
@@ -1513,6 +1565,7 @@ function vMovimientos(el) {
     $('#ayuda', el).textContent = AYUDA_TIPO[M.tipo];
     $('#lbl-dest', el).hidden = M.tipo !== 'TRASPASO';
     $('#lbl-costo', el).hidden = M.tipo !== 'ENTRADA' || !veCostos();
+    $('#lbl-cad', el).hidden = M.tipo !== 'ENTRADA';
     $('#txt-cant', el).textContent = M.tipo === 'AJUSTE' ? 'Existencia contada' : 'Cantidad';
   };
   const pintarPend = () => {
@@ -1564,6 +1617,7 @@ function vMovimientos(el) {
       producto_id: prod.id,
       cantidad: cant,
       costo_unitario: M.tipo === 'ENTRADA' && fm.costo_unitario.value !== '' ? Number(fm.costo_unitario.value) : '',
+      caducidad: M.tipo === 'ENTRADA' ? fm.caducidad.value : '',
       referencia: fm.referencia.value.trim(),
       notas: fm.notas.value.trim(),
       origen: enLinea ? 'online' : 'offline',
@@ -1575,6 +1629,7 @@ function vMovimientos(el) {
     M.referencia = mov.referencia;
     fm.cantidad.value = '';
     fm.costo_unitario.value = '';
+    fm.caducidad.value = '';
     fm.notas.value = '';
     sel.limpiar();
     $('.sel-q', el).focus();
@@ -1859,7 +1914,7 @@ function dlgProveedor(p, alGuardar) {
 }
 
 // Editor de orden de compra o de pedido programado
-function dlgEditorOrden(base, modo = 'orden') {
+function dlgEditorOrden(base, modo = 'orden', inicial = null) {
   const esProg = modo === 'programada';
   const nuevo = !base;
   const D = CMP.datos;
@@ -1867,7 +1922,7 @@ function dlgEditorOrden(base, modo = 'orden') {
   const almDef = (almsDestino.find(a => a.tipo === 'BODEGA') || almsDestino[0] || {}).id || '';
   const o = base ? JSON.parse(JSON.stringify(base)) : {
     proveedor_id: '', almacen_id: almDef, iva_tasa: 16, fecha_entrega: esProg ? '' : hoyLocal(3), notas: '', lineas: [],
-    frecuencia: 'SEMANAL', proxima: hoyLocal(7), accion: 'BORRADOR', activo: true, nombre: ''
+    frecuencia: 'SEMANAL', proxima: hoyLocal(7), accion: 'BORRADOR', activo: true, nombre: '', ...(inicial || {})
   };
   const lineas = (o.lineas || []).map(l => ({ producto_id: l.producto_id, cantidad: Number(l.cantidad), costo: Number(l.costo) }));
   const provs = D.proveedores.filter(p => esActivo(p.activo) || p.id === o.proveedor_id).sort(porNombre);
@@ -1956,7 +2011,7 @@ function dlgEditorOrden(base, modo = 'orden') {
   $('#feo-sugerir', d).onclick = () => {
     const ex = mapaExistencias();
     let n = 0;
-    S.catalogo.productos.filter(p => esActivo(p.activo) && Number(p.stock_minimo) > 0).forEach(p => {
+    S.catalogo.productos.filter(p => esActivo(p.activo) && !esActivo(p.descontinuado || false) && Number(p.stock_minimo) > 0).forEach(p => {
       const c = ex[f.almacen_id.value + '|' + p.id] || 0;
       const min = Number(p.stock_minimo);
       if (c < min && !lineas.some(l => l.producto_id === p.id)) {
@@ -2118,12 +2173,13 @@ function dlgRecibir(o) {
   const d = abrirModal(`Recibir ${o.folio}`, `
     <form id="frec" class="form" autocomplete="off">
       <p class="nota">Captura lo que llegó físicamente. Si falta algo, la orden queda como "Recibida parcial" para recibir el resto después.</p>
-      <div class="tabla-cont"><table class="tabla lineas-oc"><thead><tr><th>Producto</th><th class="num">Pendiente</th><th class="num">Llegó</th><th class="num">Costo unit.</th></tr></thead>
+      <div class="tabla-cont"><table class="tabla lineas-oc"><thead><tr><th>Producto</th><th class="num">Pendiente</th><th class="num">Llegó</th><th class="num">Costo unit.</th><th>Caduca</th></tr></thead>
         <tbody>${pendientes.map(({ l, pend }, i) => {
           const p = S.idx.prod[l.producto_id] || {};
           return `<tr><td>${esc(p.nombre || '—')}<small>${esc(p.codigo || '')}</small></td><td class="num">${numero(pend)} ${esc(p.unidad || '')}</td>
             <td class="num"><input type="number" min="0" step="any" data-i="${i}" data-k="cantidad" value="${pend}"></td>
-            <td class="num"><input type="number" min="0" step="0.01" data-i="${i}" data-k="costo" value="${l.costo}"></td></tr>`;
+            <td class="num"><input type="number" min="0" step="0.01" data-i="${i}" data-k="costo" value="${l.costo}"></td>
+            <td><input type="date" data-i="${i}" data-k="caducidad" title="Fecha de caducidad (opcional)"></td></tr>`;
         }).join('')}</tbody></table></div>
       <div class="fila2"><label>Folio de factura o remisión<input name="factura"></label><label>Notas<input name="notas"></label></div>
       <label class="archivo"><input type="file" name="archivos" multiple accept=".pdf,.xml,.jpg,.jpeg,.png"><span>Adjuntar factura (PDF, XML o foto) — opcional</span></label>
@@ -2141,7 +2197,8 @@ function dlgRecibir(o) {
     const lineas = pendientes.map(({ l, pend }, i) => ({
       linea_id: l.id, pend,
       cantidad: Number(f.querySelector(`[data-i="${i}"][data-k="cantidad"]`).value) || 0,
-      costo: f.querySelector(`[data-i="${i}"][data-k="costo"]`).value
+      costo: f.querySelector(`[data-i="${i}"][data-k="costo"]`).value,
+      caducidad: f.querySelector(`[data-i="${i}"][data-k="caducidad"]`).value
     })).filter(x => x.cantidad > 0);
     if (!lineas.length) { msg.textContent = 'Captura al menos una cantidad recibida.'; return; }
     const demas = lineas.filter(x => x.cantidad > x.pend);
@@ -2150,7 +2207,7 @@ function dlgRecibir(o) {
     try {
       const r = await conCarga('Registrando recepción…', () => api('recibirOrden', {
         id: o.id, recepcion_id: recepcionId, factura: f.factura.value.trim(), notas: f.notas.value.trim(),
-        actualizar_costo: f.actualizar.checked, lineas: lineas.map(({ linea_id, cantidad, costo }) => ({ linea_id, cantidad, costo }))
+        actualizar_costo: f.actualizar.checked, lineas: lineas.map(({ linea_id, cantidad, costo, caducidad }) => ({ linea_id, cantidad, costo, caducidad }))
       }));
       actualizarOrdenLocal(r.orden);
       const archivos = Array.from(f.archivos.files);
@@ -2184,6 +2241,9 @@ async function dlgEmpresa() {
       <label>Dirección<input name="direccion" value="${esc(emp.direccion)}"></label>
       <div class="fila2"><label>Teléfono<input name="telefono" value="${esc(emp.telefono)}"></label>
         <label>Correo (los proveedores responden a este)<input name="email" type="email" value="${esc(emp.email)}"></label></div>
+      <div class="fila2"><label>Entregas a clientes desde<input name="entrega_inicio" type="time" step="1800" value="${esc(emp.entrega_inicio || '09:00')}"></label>
+        <label>hasta<input name="entrega_fin" type="time" step="1800" value="${esc(emp.entrega_fin || '21:00')}"></label></div>
+      <p class="nota" id="emp-franjas"></p>
       <div class="campo"><span>Logo para las órdenes de compra</span>
         <div class="fila-form"><img id="emp-logo" class="logo-prev" alt="" ${logo ? `src="${logo}"` : 'hidden'}>
           <div class="acciones"><label class="btn sec">Elegir imagen<input type="file" accept="image/png,image/jpeg" id="emp-arch" hidden></label>
@@ -2193,6 +2253,15 @@ async function dlgEmpresa() {
       <div class="pie"><button type="button" class="btn sec" data-cerrar>Cancelar</button><button class="btn" type="submit">Guardar</button></div>
     </form>`);
   const f = $('#femp', d), img = $('#emp-logo', d), msg = $('#femp-msg', d);
+  const franjas = () => {
+    const m = t => { const x = /^(\d{1,2}):(\d{2})/.exec(t || ''); return x ? Number(x[1]) * 60 + Number(x[2]) : null; };
+    const h = v => String(Math.floor(v / 60)).padStart(2, '0') + ':' + String(v % 60).padStart(2, '0');
+    const a = m(f.entrega_inicio.value), b = m(f.entrega_fin.value), l = [];
+    if (a !== null && b !== null) for (let x = a; x < b && l.length < 12; x += 120) l.push(h(x) + ' a ' + h(Math.min(x + 120, b)));
+    $('#emp-franjas', d).textContent = l.length ? 'Los clientes eligen entre: ' + l.join(' · ') : 'La hora final debe ser después de la inicial.';
+  };
+  f.entrega_inicio.oninput = f.entrega_fin.oninput = franjas;
+  franjas();
   const ponerLogo = url => {
     logo = url;
     img.hidden = !url;
@@ -2233,7 +2302,8 @@ async function dlgEmpresa() {
     msg.textContent = '';
     try {
       await conCarga('Guardando…', () => api('guardarEmpresa', { empresa: {
-        nombre: f.nombre.value, rfc: f.rfc.value, direccion: f.direccion.value, telefono: f.telefono.value, email: f.email.value, logo
+        nombre: f.nombre.value, rfc: f.rfc.value, direccion: f.direccion.value, telefono: f.telefono.value, email: f.email.value,
+        entrega_inicio: f.entrega_inicio.value, entrega_fin: f.entrega_fin.value, logo
       } }));
       cerrarModal();
       toast('Datos de la empresa guardados.', 'ok');
@@ -2785,6 +2855,7 @@ function vCaja(el) {
         <div class="cj-lineas" id="cj-lineas"></div>
         <div class="cj-total" id="cj-total"></div>
         <div class="acciones"><button type="button" class="btn cobrar" id="cj-cobrar">Cobrar <small>(F2)</small></button>
+          <button type="button" class="btn sec" id="cj-auto" title="Cobrar lo que el cliente escaneó con su teléfono">Autocobro</button>
           <button type="button" class="btn sec" id="cj-vaciar">Vaciar</button></div>
       </aside>
       </div>
@@ -2876,9 +2947,28 @@ function vCaja(el) {
   q.focus();
 
   q.oninput = () => { CJ.q = q.value; pintarRes(); };
+  const traerAutocobro = async codigo => {
+    if (!navigator.onLine) { toast('Para traer un autocobro se necesita internet.', 'error'); return; }
+    try {
+      const r = await conCarga('Trayendo el autocobro…', () => api('tomarAutocobro', { codigo, almacen_id: E.corte.almacen_id }));
+      const c = cuentaVacia(CJ.ticket) ? CJ.ticket : nuevaCuenta();
+      const cli = clientePorId(r.cliente_id);
+      Object.assign(c, { cliente_id: cli ? r.cliente_id : '', nombre: (r.cliente || 'Cliente') + ' · autocobro ' + r.codigo, autocobro: r.id });
+      c.lineas = r.lineas.filter(l => S.idx.prod[l.producto_id]).map(l => ({ producto_id: l.producto_id, cantidad: Number(l.cantidad), precio: precioCliente(S.idx.prod[l.producto_id], cli) }));
+      c.ultimo = c.lineas.length ? c.lineas[c.lineas.length - 1].producto_id : '';
+      CJ.activa = c.id;
+      pintarTicket(); pintarRes();
+      toast(`Autocobro de ${r.cliente}: ${plural(c.lineas.length, 'producto')} por ${dinero(totalCuenta(c))}. Revisa la mercancía y cobra.`, 'ok');
+    } catch (er) { toast(er.message, 'error'); }
+  };
+  $('#cj-auto', el).onclick = () => {
+    const v = prompt('Código de autocobro que muestra el cliente (6 números):');
+    if (v && v.trim()) traerAutocobro(v.trim());
+  };
   q.onkeydown = e => {
     if (e.key !== 'Enter') return;
     e.preventDefault();
+    if (/^AC\s?\d{3}\s?\d{3}$/i.test(q.value.trim())) { const v = q.value.replace(/\s/g, ''); q.value = ''; CJ.q = ''; traerAutocobro(v); return; }
     let v = q.value.trim(), cant = 1;
     const m = v.match(/^(\d+(?:\.\d+)?)\*(.+)$/);
     if (m) { cant = Number(m[1]); v = m[2].trim(); }
@@ -3212,7 +3302,8 @@ function dlgCobrar(alTerminar) {
     const op = {
       clase: 'VENTA', id: uuid(), corte_id: E.corte.id, almacen_id: E.corte.almacen_id, cliente_id: cli ? cli.id : '',
       lineas: CJ.ticket.lineas.map(l => ({ producto_id: l.producto_id, cantidad: Number(l.cantidad), precio: Number(l.precio) })),
-      pagos: { efectivo: c.efectivo, tarjeta: v('tarjeta'), transferencia: v('transferencia'), credito }, recibido: c.efectivo > 0 ? c.recibido : 0
+      pagos: { efectivo: c.efectivo, tarjeta: v('tarjeta'), transferencia: v('transferencia'), credito }, recibido: c.efectivo > 0 ? c.recibido : 0,
+      autocobro_id: CJ.ticket.autocobro || ''
     };
     const local = Object.assign({}, op, {
       fecha: new Date().toISOString(), total, cambio: c.efectivo > 0 ? Math.max(0, c.cambio) : 0, sync: 'pendiente',
@@ -4299,7 +4390,8 @@ function dlgCliente(cl, alGuardar) {
       <label>Dirección<input name="direccion" value="${esc(cl.direccion || '')}"></label>
       <label class="chk"><input type="checkbox" name="credito" ${cl.credito ? 'checked' : ''}> Tiene crédito autorizado</label>
       <div class="fila2" id="cl-cred"><label>Límite de crédito<input name="limite_credito" type="number" step="0.01" min="0" value="${cl.limite_credito || 0}"></label>
-        <label>Días para pagar<input name="dias_credito" type="number" step="1" min="0" value="${cl.dias_credito || 0}"></label></div>
+        <label>Días para pagar <small>(naturales, desde el día del pedido o venta)</small><input name="dias_credito" type="number" step="1" min="0" list="cl-dias-sug" value="${cl.dias_credito || 30}">
+          <datalist id="cl-dias-sug">${[7, 15, 30, 45, 60, 90, 120].map(n => `<option value="${n}">`).join('')}</datalist></label></div>
       <div class="fila2"><label>Notas<input name="notas" value="${esc(cl.notas || '')}"></label><label class="chk"><input type="checkbox" name="activo" ${cl.activo !== false ? 'checked' : ''}> Activo</label></div>
       <p class="msg" id="fcl-msg"></p>
       <div class="pie"><button type="button" class="btn sec" data-cerrar>Cancelar</button><button class="btn" type="submit">Guardar</button></div>
@@ -4480,7 +4572,7 @@ function tarjetaPedido(p) {
   return `<button type="button" class="oc ${atrasado ? 'atrasada' : ''}" data-pd="${esc(p.id)}">
     <span class="fila-oc"><span class="folio">${esc(p.folio)}</span><span class="est ${p.tipo === 'EXTERNO' ? 'est-ENVIADA' : 'est-BORRADOR'}">${p.tipo === 'EXTERNO' ? 'Cliente' : 'Sucursal'}</span></span>
     <span>${esc(destinoPedido(p))}</span>
-    <span class="fila-oc"><small>${p.fecha_entrega ? (p.fecha_entrega === hoy ? '<b>Hoy</b>' : (atrasado ? '<b class="txt-error">Atrasado ' : '') + fechaCorta(p.fecha_entrega) + (atrasado ? '</b>' : '')) : 'Sin fecha'}${enRuta ? ` · ${enRuta} en ruta` : ''}</small><b>${dinero(p.total)}</b></span>
+    <span class="fila-oc"><small>${p.fecha_entrega ? (p.fecha_entrega === hoy ? '<b>Hoy</b>' : (atrasado ? '<b class="txt-error">Atrasado ' : '') + fechaCorta(p.fecha_entrega) + (atrasado ? '</b>' : '')) : 'Sin fecha'}${entregaTxt(p) ? ' · ' + entregaTxt(p) : ''}${enRuta ? ` · ${enRuta} en ruta` : ''}</small><b>${dinero(p.total)}</b></span>
     ${p.estado === 'EN_PROCESO' ? `<span class="barra-avance"><span style="width:${av}%"></span></span>` : ''}
   </button>`;
 }
@@ -4505,7 +4597,7 @@ function pintarListaPedidos(c) {
   c.innerHTML = `<div class="filtros"><input id="pd-q" type="search" placeholder="Buscar folio, cliente o sucursal" value="${esc(PD.q)}"></div>
     ${l.length ? `<div class="tabla-cont"><table class="tabla"><thead><tr><th>Folio</th><th>Para</th><th>Tipo</th><th>Entrega</th><th>Avance</th><th class="num">Total</th><th>Estado</th></tr></thead>
     <tbody>${l.map(p => `<tr class="clic" data-pd="${esc(p.id)}"><td><b>${esc(p.folio)}</b></td><td>${esc(destinoPedido(p))}</td><td>${p.tipo === 'EXTERNO' ? 'Cliente' : 'Sucursal'}${p.solicito === 'PORTAL' ? ' · portal' : ''}</td>
-      <td>${fechaCorta(p.fecha_entrega)}</td><td>${avancePedido(p)}%</td><td class="num">${dinero(p.total)}</td><td>${chipPed(p.estado)}</td></tr>`).join('')}</tbody></table></div>`
+      <td>${fechaCorta(p.fecha_entrega)}${entregaTxt(p) ? `<small>${entregaTxt(p)}</small>` : ''}</td><td>${avancePedido(p)}%</td><td class="num">${dinero(p.total)}</td><td>${chipPed(p.estado)}</td></tr>`).join('')}</tbody></table></div>`
     : '<p class="vacio">Sin pedidos.</p>'}`;
   const qi = $('#pd-q', c);
   qi.oninput = () => { PD.q = qi.value; const pos = qi.selectionStart; pintarListaPedidos(c); const n = $('#pd-q', c); n.focus(); n.setSelectionRange(pos, pos); };
@@ -4625,6 +4717,18 @@ function dlgEditorPedido(base) {
   };
 }
 
+// Mensaje listo para avisar al cliente por WhatsApp según cómo va su pedido
+function mensajeWhatsApp(p) {
+  const hola = `Hola, te escribimos de ${CFG.NOMBRE} sobre tu pedido ${p.folio} (${dinero(p.total)}). `;
+  const cuando = (p.fecha_entrega ? fechaCorta(p.fecha_entrega) : '') + (p.horario_entrega ? ' de ' + p.horario_entrega.replace('-', ' a ') : '');
+  if (p.estado === 'SOLICITADO') return hola + 'Ya lo recibimos y en breve lo programamos.';
+  if (p.estado === 'PROGRAMADO') return hola + (p.modalidad === 'RECOGER' ? `Estará listo para que pases por él el ${cuando}.` : `Quedó programado para entregarse el ${cuando}.`);
+  if (p.estado === 'EN_PROCESO') return hola + (p.envios.some(e => e.estado === 'EN_RUTA') ? 'Ya va en camino.' : 'Lo estamos preparando.');
+  if (p.estado === 'ENTREGADO') return hola + '¡Gracias por tu compra!';
+  if (p.estado === 'CANCELADO') return hola + 'Lamentablemente fue cancelado. Cualquier duda, aquí estamos.';
+  return hola;
+}
+
 function dlgPedido(p) {
   if (!p) return;
   // Surte quien tiene el almacén de origen: bodega, o la sucursal a la que otra le pidió un traspaso
@@ -4640,11 +4744,12 @@ function dlgPedido(p) {
   if (bodega && p.estado === 'EN_PROCESO' && !enRuta.length) acciones.push(['cerrar', 'Cerrar con faltante', 'sec']);
   if (['SOLICITADO', 'PROGRAMADO'].includes(p.estado) && !tieneEnvios && (bodega || p.estado === 'SOLICITADO')) acciones.push(['cancelar', 'Cancelar pedido', 'peligro']);
   const cli = p.tipo === 'EXTERNO' ? clientePorId(p.cliente_id) : null;
+  const telWa = p.tipo === 'EXTERNO' ? (String((cli && cli.telefono) || '').replace(/\D/g, '').slice(-10) || ((String(p.notas || '').match(/Tel\. (\d{10})/) || [])[1] || '')) : '';
   const d = abrirModal(`Pedido ${p.folio}`, `<div class="form">
     <div class="titulo"><span>${chipPed(p.estado)} <span class="nota">${p.tipo === 'EXTERNO' ? 'Cliente externo' : 'Traspaso a sucursal'} · ${p.solicito === 'PORTAL' ? 'pedido desde el portal' : p.solicito === 'SUCURSAL' ? 'solicitado por la sucursal' : 'capturado en bodega'}</span></span><b>${dinero(p.total)}</b></div>
     <div class="info-oc">
-      <div><h4>Para</h4><b>${esc(destinoPedido(p))}</b>${cli && cli.telefono ? '<br>' + esc(cli.telefono) : ''}${p.tipo === 'EXTERNO' ? `<br>${p.condicion === 'CREDITO' ? 'Crédito' : 'Contado'}${Number(p.iva_tasa) ? ' · IVA ' + p.iva_tasa + '%' : ''}` : ''}</div>
-      <div><h4>Surte</h4><b>${esc((S.idx.alm[p.origen_id] || {}).nombre || '')}</b><br>Entrega: ${fechaCorta(p.fecha_entrega)}</div>
+      <div><h4>Para</h4><b>${esc(destinoPedido(p))}</b>${cli && cli.telefono ? '<br>' + esc(cli.telefono) : ''}${telWa.length === 10 ? ` <a class="btn mini sec wa" target="_blank" rel="noopener" href="https://wa.me/52${telWa}?text=${encodeURIComponent(mensajeWhatsApp(p))}">WhatsApp</a>` : ''}${p.tipo === 'EXTERNO' ? `<br>${p.condicion === 'CREDITO' ? 'Crédito' : 'Contado'}${Number(p.iva_tasa) ? ' · IVA ' + p.iva_tasa + '%' : ''}` : ''}</div>
+      <div><h4>Surte</h4><b>${esc((S.idx.alm[p.origen_id] || {}).nombre || '')}</b><br>Entrega: ${fechaCorta(p.fecha_entrega)}${entregaTxt(p) ? ' · ' + entregaTxt(p) : ''}</div>
       <div><h4>Avance</h4>${avancePedido(p)}% entregado<br>Pedido: ${fechaHora(p.fecha)}${p.cerrado ? '<br>Terminado: ' + fechaHora(p.cerrado) : ''}</div>
     </div>
     <div class="tabla-cont"><table class="tabla"><thead><tr><th>Producto</th><th class="num">Pedido</th><th class="num">En ruta</th><th class="num">Entregado</th><th class="num">Pendiente</th><th class="num">Precio</th><th class="num">Importe</th></tr></thead>
@@ -4828,7 +4933,7 @@ function imprimirRemision(p, e) {
       <div style="text-align:right"><h1>REMISIÓN</h1><div class="folio">${esc(e.folio)}</div>Pedido ${esc(p.folio)}<br>${fechaHora(e.fecha)}</div></div>
     <div class="cajas"><div class="caja"><h3>${externo ? 'Cliente' : 'Sucursal'}</h3><b>${esc(externo ? cli.nombre || '' : dest.nombre || '')}</b><br>
       ${esc(externo ? cli.direccion || '' : dest.direccion || '')}${(externo ? cli.telefono : dest.telefono) ? '<br>Tel. ' + esc(externo ? cli.telefono : dest.telefono) : ''}${externo && cli.rfc ? '<br>RFC ' + esc(cli.rfc) : ''}</div>
-      <div class="caja"><h3>Entrega</h3>Fecha programada: ${fechaCorta(p.fecha_entrega)}<br>${externo ? (p.condicion === 'CREDITO' ? 'Condición: crédito' : 'Condición: contado') : 'Traspaso entre almacenes'}${e.notas ? '<br>' + esc(e.notas) : ''}</div></div>
+      <div class="caja"><h3>Entrega</h3>Fecha programada: ${fechaCorta(p.fecha_entrega)}${entregaTxt(p) ? ' · ' + entregaTxt(p) : ''}<br>${externo ? (p.condicion === 'CREDITO' ? 'Condición: crédito' : 'Condición: contado') : 'Traspaso entre almacenes'}${e.notas ? '<br>' + esc(e.notas) : ''}</div></div>
     <table><thead><tr><th>Código</th><th>Producto</th><th>Unidad</th><th class="n">Enviado</th><th class="n">Recibido</th>${externo ? '<th class="n">Precio</th><th class="n">Importe</th>' : ''}</tr></thead>
       <tbody>${filas}${externo ? `<tr class="tot"><td colspan="6" class="n">Subtotal</td><td class="n">${dinero(sub)}</td></tr>${iva ? `<tr><td colspan="6" class="n">IVA ${p.iva_tasa}%</td><td class="n">${dinero(iva)}</td></tr>` : ''}
         <tr class="tot"><td colspan="6" class="n">Total</td><td class="n">${dinero(sub + iva)}</td></tr>` : ''}</tbody></table>
@@ -4855,18 +4960,27 @@ async function cargarPortal(c) {
 function vInicioPortal(el) {
   const c = S.cliente || {};
   const disp = c.credito ? creditoDisponible(c) : 0;
+  const prox = (c.vencimientos || []).find(x => x.dias >= 0);
   el.innerHTML = `<div class="saludo"><h2>Hola, ${esc(c.nombre || S.usuario.nombre)}</h2><p>Portal de clientes · ${esc(CFG.NOMBRE)}</p></div>
-    <div class="tarjetas">
-      <div class="tarjeta"><span>Saldo pendiente</span><b>${dinero(c.saldo)}</b></div>
-      ${c.credito ? `<div class="tarjeta"><span>Crédito disponible</span><b>${dinero(disp)}</b><small>Límite ${dinero(c.limite_credito)} · ${c.dias_credito} días</small></div>` : ''}
+    ${avisoCredito(c)}
+    ${S.avisosCliente && S.avisosCliente.nuevos && S.avisosCliente.nuevos.length ? `<button type="button" class="aviso-nuevo" data-ir="avisos"><span>${iconoAviso(S.avisosCliente.nuevos[0].tipo)}</span>
+      <span><b>${esc(S.avisosCliente.nuevos[0].titulo)}</b><small>${esc(S.avisosCliente.nuevos[0].mensaje)}</small></span>${S.avisosCliente.no_leidos > 1 ? `<small>+${S.avisosCliente.no_leidos - 1} más</small>` : ''}</button>` : ''}
+    ${permisoNotif() === 'default' ? '<p><button type="button" class="btn sec" id="pi-notif">🔔 Avísame en este teléfono cuando cambie mi pedido</button></p>' : ''}
+    ${c.credito || Number(c.saldo) > 0 ? `<div class="tarjetas">
+      <button type="button" class="tarjeta" data-ir="estado"><span>Saldo pendiente</span><b>${dinero(c.saldo)}</b>${prox ? `<small>Próximo vencimiento: ${dinero(prox.saldo)} el ${fechaCorta(prox.vence)}</small>` : ''}</button>
+      ${c.credito ? `<div class="tarjeta"><span>Crédito disponible</span><b>${dinero(c.disponible !== undefined ? c.disponible : disp)}</b><small>Límite ${dinero(c.limite_credito)} · cada pedido vence a ${c.dias_credito} días</small></div>` : ''}
       <button type="button" class="tarjeta ${Number(c.vencido) > 0 ? 'alerta-roja' : ''}" data-ir="estado"><span>Vencido</span><b>${dinero(c.vencido)}</b></button>
-    </div>
+    </div>` : '<p class="nota">Tus pedidos se pagan al recibir o al recoger. Si te interesa crédito, pídelo en la tienda.</p>'}
     <div class="portal-acciones">
-      <button type="button" class="ir-caja" data-ir="tienda"><b>Hacer un pedido</b><span>Catálogo con tus precios</span></button>
+      <button type="button" class="ir-caja" data-ir="tienda"><b>Hacer un pedido</b><span>Catálogo con tus precios · elige día y horario</span></button>
+      <button type="button" class="ir-caja ir-tienda" data-ir="entienda"><b>Estoy en la tienda</b><span>Escanea tus productos, verifica precios y paga rápido en caja</span></button>
       <button type="button" class="btn sec" data-ir="mispedidos">Mis pedidos</button>
       <button type="button" class="btn sec" data-ir="estado">Estado de cuenta</button>
     </div>
-    ${Number(c.vencido) > 0 ? '<p class="aviso-offline">Tienes saldo vencido: los pedidos nuevos solo pueden ser de contado hasta que se regularice.</p>' : ''}`;
+    <p><button type="button" class="link" id="pi-datos">Mis datos: ${esc(c.telefono ? telBonito(c.telefono) : 'agrega tu teléfono')} · ${esc(c.direccion || 'agrega tu dirección')}</button></p>`;
+  $('#pi-datos', el).onclick = e => { e.stopPropagation(); dlgMisDatos(); };
+  const pn = $('#pi-notif', el);
+  if (pn) pn.onclick = async e => { e.stopPropagation(); if (await pedirPermisoNotif()) pn.remove(); };
   el.onclick = e => { const b = e.target.closest('[data-ir]'); if (b) irA(b.dataset.ir); };
   S.refrescar = () => vInicioPortal(el);
 }
@@ -4874,6 +4988,7 @@ function vInicioPortal(el) {
 async function vTienda(el) {
   if (!PT.carrito) PT.carrito = (await DB.get('carrito:' + S.usuario.usuario)) || { lineas: [], condicion: '', fecha: '', notas: '' };
   const K = PT.carrito;
+  if (!K.modalidad) K.modalidad = 'DOMICILIO';
   const cli = S.cliente || {};
   const puedeCredito = cli.credito && !(Number(cli.vencido) > 0);
   if (!K.condicion) K.condicion = puedeCredito ? 'CREDITO' : 'CONTADO';
@@ -4888,9 +5003,13 @@ async function vTienda(el) {
         <b>Tu pedido</b>
         <div class="cj-lineas" id="pt-lineas"></div>
         <div class="cj-total" id="pt-total"></div>
-        <label>Pago<select id="pt-cond"><option value="CONTADO">Contado</option>${puedeCredito ? `<option value="CREDITO" ${K.condicion === 'CREDITO' ? 'selected' : ''}>Crédito (disponible ${dinero(creditoDisponible(cli))})</option>` : ''}</select></label>
-        <label>Fecha deseada de entrega<input id="pt-fecha" type="date" min="${hoyLocal()}" value="${esc(K.fecha)}"></label>
-        <label>Notas<input id="pt-notas" value="${esc(K.notas)}" placeholder="Horario, dirección de entrega…"></label>
+        ${puedeCredito ? `<label>¿Cómo pagas?<select id="pt-cond"><option value="CREDITO" ${K.condicion === 'CREDITO' ? 'selected' : ''}>A crédito · disponible ${dinero(cli.disponible !== undefined ? cli.disponible : creditoDisponible(cli))} · vence a ${cli.dias_credito} días</option><option value="CONTADO" ${K.condicion === 'CONTADO' ? 'selected' : ''}>Pago al recibir o recoger</option></select></label>`
+          : `<p class="nota">${cli.credito ? '<b class="txt-error">Tienes pagos vencidos:</b> este pedido se paga al recibir o recoger.' : 'Pagas al recibir o al recoger (efectivo o tarjeta).'}</p><input type="hidden" id="pt-cond" value="CONTADO">`}
+        <label>¿Cómo lo recibes?<select id="pt-mod"><option value="DOMICILIO">Entrega a domicilio</option><option value="RECOGER" ${K.modalidad === 'RECOGER' ? 'selected' : ''}>Paso a recogerlo a la tienda</option></select></label>
+        <div class="fila2"><label>Fecha<input id="pt-fecha" type="date" min="${hoyLocal()}" value="${esc(K.fecha)}"></label>
+          <label>Horario<select id="pt-hora"><option value="">Cualquier hora</option>${(S.horariosEntrega || HORARIOS_ENTREGA).map(h => `<option value="${h}" ${K.horario === h ? 'selected' : ''}>${h.replace('-', ' a ')}</option>`).join('')}</select></label></div>
+        <p class="nota" id="pt-dir">${K.modalidad === 'RECOGER' ? 'Lo recoges en la tienda.' : cli.direccion ? `Se entrega en: <b>${esc(cli.direccion)}</b> · <button type="button" class="link" id="pt-misdatos">cambiar</button>` : '<button type="button" class="link" id="pt-misdatos">Agrega tu dirección de entrega</button>'}</p>
+        <label>Notas<input id="pt-notas" value="${esc(K.notas)}" placeholder="Referencias, quién recibe…"></label>
         <p class="msg" id="pt-msg"></p>
         <button type="button" class="btn cobrar" id="pt-enviar">Enviar pedido</button>
       </aside>
@@ -4948,6 +5067,10 @@ async function vTienda(el) {
   };
   $('#pt-cond', el).onchange = e => { K.condicion = e.target.value; guardarCarrito(); };
   $('#pt-fecha', el).onchange = e => { K.fecha = e.target.value; guardarCarrito(); };
+  $('#pt-hora', el).onchange = e => { K.horario = e.target.value; guardarCarrito(); };
+  $('#pt-mod', el).onchange = e => { K.modalidad = e.target.value; guardarCarrito(); vTienda(el); };
+  const bmd = $('#pt-misdatos', el);
+  if (bmd) bmd.onclick = dlgMisDatos;
   $('#pt-notas', el).oninput = e => { K.notas = e.target.value; guardarCarrito(); };
   $('#pt-ver', el).onclick = () => $('.caja-ticket', el).scrollIntoView({ behavior: 'smooth' });
   const enviar = async () => {
@@ -4955,8 +5078,8 @@ async function vTienda(el) {
     if (!navigator.onLine) { msg.textContent = 'Necesitas conexión para enviar el pedido. Tu carrito se guarda en este equipo.'; return; }
     if (!K.id) { K.id = uuid(); guardarCarrito(); }
     try {
-      const r = await conCarga('Enviando pedido…', () => api('guardarPedido', { pedido: { nuevo: true, id: K.id, condicion: K.condicion, fecha_entrega: K.fecha, notas: K.notas, lineas: K.lineas } }));
-      PT.carrito = { lineas: [], condicion: '', fecha: '', notas: '' };
+      const r = await conCarga('Enviando pedido…', () => api('guardarPedido', { pedido: { nuevo: true, id: K.id, condicion: K.condicion, fecha_entrega: K.fecha, horario_entrega: K.horario || '', modalidad: K.modalidad, notas: K.notas, lineas: K.lineas } }));
+      PT.carrito = { lineas: [], condicion: '', fecha: '', notas: '', modalidad: K.modalidad };
       await DB.set('carrito:' + S.usuario.usuario, PT.carrito);
       toast(`¡Gracias! Recibimos tu pedido ${r.pedido.folio}. Te avisaremos cuando vaya en camino.`, 'ok');
       PT.datos = null;
@@ -4980,7 +5103,7 @@ async function vMisPedidos(el) {
   const l = D.pedidos.slice().sort((a, b) => String(b.folio).localeCompare(String(a.folio)));
   c.innerHTML = l.length ? `<div class="tarjetas grandes">${l.map(p => `<button type="button" class="tarjeta" data-pd="${esc(p.id)}">
       <span class="fila-oc"><b>${esc(p.folio)}</b>${chipPed(p.estado)}</span>
-      <small>Pedido ${fechaHora(p.fecha)}${p.fecha_entrega ? ' · entrega ' + fechaCorta(p.fecha_entrega) : ''}</small>
+      <small>Pedido ${fechaHora(p.fecha)}${p.fecha_entrega ? ' · entrega ' + fechaCorta(p.fecha_entrega) : ''}${entregaTxt(p) ? ' · ' + entregaTxt(p) : ''}</small>
       <span class="fila-oc"><small>${p.envios.filter(e => e.estado === 'EN_RUTA').length ? '<b>🚚 En camino</b>' : avancePedido(p) + '% entregado'}</small><b>${dinero(p.total)}</b></span>
       ${['EN_PROCESO'].includes(p.estado) ? `<span class="barra-avance"><span style="width:${avancePedido(p)}%"></span></span>` : ''}
     </button>`).join('')}</div>` : '<p class="vacio">Aún no tienes pedidos.</p>';
@@ -5202,7 +5325,7 @@ function vUsuarios(el) {
 function dlgUsuario(u, alGuardar) {
   const nuevo = !u;
   u = u || { rol: 'CAJERO', activo: true, almacen_id: esGeneral() ? '' : S.usuario.almacen_id };
-  const roles = esGeneral() ? Object.keys(ROL_TXT) : ['CAJERO', 'INVENTARIOS'];
+  const roles = esGeneral() ? Object.keys(ROL_TXT) : ['CAJERO', 'INVENTARIOS', 'VERIFICADOR'];
   const alms = esGeneral() ? S.catalogo.almacenes.filter(a => esActivo(a.activo) || a.id === u.almacen_id).sort(porNombre) : almacenesVisibles();
   const d = abrirModal(nuevo ? 'Nuevo usuario' : 'Editar usuario', `
     <form id="fu" class="form" autocomplete="off">
@@ -5252,7 +5375,8 @@ function vCuenta(el) {
   const a = S.idx.alm[S.usuario.almacen_id];
   el.innerHTML = `
     <div class="titulo"><h2>Mi cuenta</h2></div>
-    <div class="panel"><p><b>${esc(S.usuario.nombre)}</b> (${esc(S.usuario.usuario)})</p><p>${esc(ROL_TXT[rol()] || rol())}${a ? ' · ' + esc(a.nombre) : ''}</p></div>
+    <div class="panel"><p><b>${esc(S.usuario.nombre)}</b> (${esc(S.usuario.usuario)})</p><p>${esc(ROL_TXT[rol()] || rol())}${a ? ' · ' + esc(a.nombre) : ''}</p>
+      ${rol() === 'CLIENTE' ? '<button type="button" class="btn sec" id="b-misdatos">Mis datos de contacto y entrega</button>' : ''}</div>
     <div class="panel">
       <h3>Este equipo</h3>
       <p>Datos guardados: ${numero(S.catalogo.productos.length)} productos, ${numero(S.catalogo.almacenes.length)} almacenes.</p>
@@ -5276,6 +5400,8 @@ function vCuenta(el) {
     });
   }
   $('#b-sync', el).onclick = () => sincronizar(true);
+  const bmd = $('#b-misdatos', el);
+  if (bmd) bmd.onclick = dlgMisDatos;
   const bl = $('#b-letra', el);
   bl.value = String(APAR.letraEquipo || 0);
   bl.onchange = async () => { APAR.letraEquipo = Number(bl.value) || 0; await DB.set('letra-equipo', APAR.letraEquipo); aplicarApariencia(); };
@@ -5554,6 +5680,1824 @@ function dlgApariencia() {
   };
 }
 
+/* ---------------- Personal y nómina ---------------- */
+const PER = { tab: 'asistencia', base: null, desde: '', hasta: '', alm: '', emp: '', ntipo: 'QUINCENAL', nfecha: '' };
+const LETRA_DIA = ['D', 'L', 'M', 'M', 'J', 'V', 'S'];
+const NOMBRE_DIA = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
+const ESTADO_DIA = {
+  A_TIEMPO: ['A tiempo', '✓'], RETARDO: ['Retardo', 'R'], FALTA: ['Falta', 'F'], DESCANSO: ['Descanso', 'D'], VACACIONES: ['Vacaciones', 'V'],
+  PERMISO: ['Permiso con goce', 'P'], INCAPACIDAD: ['Incapacidad (sin pago)', 'I'], FIJO: ['Salario fijo (no checa)', '$'], PENDIENTE: ['Pendiente de checar', '·']
+};
+const TIPO_PAGO_TXT = { DIARIO: 'Diario', SEMANAL: 'Semanal', QUINCENAL: 'Quincenal' };
+const ESTADO_SOL = { SOLICITADA: 'Por aprobar', SOLICITADO: 'Por aprobar', APROBADA: 'Aprobada', APROBADO: 'Aprobado', RECHAZADA: 'Rechazada',
+  RECHAZADO: 'Rechazado', CANCELADA: 'Cancelada', CANCELADO: 'Cancelado', DESCONTADO: 'Descontado en nómina' };
+const diaSem = ymd => new Date(ymd + 'T12:00:00').getDay();
+const sumarDiasL = (ymd, n) => { const d = new Date(ymd + 'T12:00:00'); d.setDate(d.getDate() + n); return d.toISOString().slice(0, 10); };
+const finMes = ymd => { const d = new Date(ymd.slice(0, 8) + '01T12:00:00'); d.setMonth(d.getMonth() + 1); d.setDate(0); return d.toISOString().slice(0, 10); };
+const quincenaDe = ymd => (Number(ymd.slice(8)) <= 15 ? [ymd.slice(0, 8) + '01', ymd.slice(0, 8) + '15'] : [ymd.slice(0, 8) + '16', finMes(ymd)]);
+const horaDe = iso => { if (!iso) return ''; const d = new Date(iso); return isNaN(d) ? '' : `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; };
+const MESES = ['ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic'];
+const rangoTxt = (a, b) => (a === b ? `${Number(a.slice(8))} ${MESES[Number(a.slice(5, 7)) - 1]} ${a.slice(0, 4)}`
+  : `${Number(a.slice(8))}${a.slice(5, 7) !== b.slice(5, 7) ? ' ' + MESES[Number(a.slice(5, 7)) - 1] : ''} al ${Number(b.slice(8))} ${MESES[Number(b.slice(5, 7)) - 1]} ${b.slice(0, 4)}`);
+const empNombre = id => ((PER.base && PER.base.empleados.find(e => e.id === id)) || {}).nombre || '—';
+const almNombre = id => (S.idx.alm[id] || {}).nombre || '';
+
+async function cargarPersonal(forzar = false) {
+  if (!PER.base || forzar) PER.base = await api('personal');
+  return PER.base;
+}
+
+function vPersonal(el) {
+  const tabs = [['asistencia', 'Asistencia'], ['nomina', 'Nómina'], ['solicitudes', 'Solicitudes'], ['bonos', 'Bonos'], ['empleados', 'Empleados'], ['reglas', 'Horarios y reglas']];
+  const pend = S.personalAvisos ? S.personalAvisos.vacaciones + S.personalAvisos.adelantos : 0;
+  el.innerHTML = `<div class="titulo"><h2>Personal</h2><div class="acciones"><button type="button" class="btn sec" id="pe-chk">Abrir checador</button></div></div>
+    <div class="segmentos" id="pe-tabs">${tabs.map(([k, t]) => `<button type="button" data-t="${k}" class="${PER.tab === k ? 'activo' : ''}">${t}${k === 'solicitudes' && pend ? ` <span class="burbuja">${pend}</span>` : ''}</button>`).join('')}</div>
+    <div id="pe-cuerpo"></div>`;
+  const c = $('#pe-cuerpo', el);
+  const pintar = async () => {
+    const base = await pedir(c, 'Cargando personal…', () => cargarPersonal());
+    if (!base) return;
+    ({ asistencia: pePintarAsistencia, nomina: pePintarNomina, solicitudes: pePintarSolicitudes, bonos: pePintarBonos, empleados: pePintarEmpleados, reglas: pePintarReglas })[PER.tab](c);
+  };
+  $('#pe-tabs', el).onclick = e => {
+    const b = e.target.closest('[data-t]');
+    if (!b) return;
+    PER.tab = b.dataset.t;
+    $$('#pe-tabs button', el).forEach(x => x.classList.toggle('activo', x === b));
+    pintar();
+  };
+  $('#pe-chk', el).onclick = () => irA('checador');
+  PER.repintar = async (forzar = true) => { if (forzar) PER.base = null; await pintar(); };
+  S.refrescar = null;
+  pintar();
+}
+
+function filtrosSucursal(id, valor) {
+  if (!esGeneral()) return '';
+  const alms = S.catalogo.almacenes.filter(a => esActivo(a.activo)).sort(porNombre);
+  return `<select id="${id}"><option value="">Todas las sucursales</option>${alms.map(a => `<option value="${esc(a.id)}" ${valor === a.id ? 'selected' : ''}>${esc(a.nombre)}</option>`).join('')}</select>`;
+}
+
+/* ---- Asistencia: tabla de la quincena ---- */
+async function pePintarAsistencia(c) {
+  if (!PER.desde) [PER.desde, PER.hasta] = quincenaDe(hoyLocal());
+  const emps = PER.base.empleados.filter(e => e.activo).sort(porNombre);
+  c.innerHTML = `<div class="filtros">
+      <div class="nav-periodo"><button type="button" class="btn sec mini" id="as-ant" aria-label="Quincena anterior">‹</button>
+        <b id="as-rango">${rangoTxt(PER.desde, PER.hasta)}</b><button type="button" class="btn sec mini" id="as-sig" aria-label="Quincena siguiente">›</button></div>
+      ${filtrosSucursal('as-alm', PER.alm)}
+      <select id="as-emp"><option value="">Todas las personas</option>${emps.map(e => `<option value="${esc(e.id)}" ${PER.emp === e.id ? 'selected' : ''}>${esc(e.nombre)}</option>`).join('')}</select>
+      <button type="button" class="btn sec" id="as-hoy">Quincena actual</button>
+    </div>
+    <div class="leyenda">${Object.entries(ESTADO_DIA).map(([k, [t, s]]) => `<span><i class="asis-c e-${k}">${s}</i>${t}</span>`).join('')}</div>
+    <div id="as-tabla"></div>`;
+  const t = $('#as-tabla', c);
+  if (!PER.base.empleados.length) { t.innerHTML = '<p class="vacio">Aún no hay empleados. Regístralos en la pestaña Empleados.</p>'; return; }
+  const r = await pedir(t, 'Calculando asistencia…', () => api('asistencia', { desde: PER.desde, hasta: PER.hasta, almacen_id: PER.alm, empleado_id: PER.emp }));
+  if (!r) return;
+  PER.asis = r;
+  const grupos = {};
+  r.empleados.forEach(e => (grupos[e.almacen_id] = grupos[e.almacen_id] || []).push(e));
+  const cols = r.dias.length + 7;
+  const tot = { base: 0, desc: 0, mas: 0, total: 0 };
+  const fila = e => {
+    const n = e.nomina;
+    const desc = n.desc_faltas + n.desc_retardos + n.adelantos + n.otros_descuentos, mas = n.bonos + n.bono_puntualidad + (n.bono_ventas || 0) + n.prima_vacacional;
+    tot.base += n.base; tot.desc += desc; tot.mas += mas; tot.total += n.total;
+    return `<tr><td class="asis-nom"><button type="button" class="link" data-emp="${esc(e.id)}">${esc(e.nombre)}</button><small>${esc(e.puesto || '')}${e.puesto ? ' · ' : ''}${TIPO_PAGO_TXT[e.tipo_pago]}</small></td>
+      ${r.dias.map(d => {
+        const x = e.dias[d] || {};
+        const est = x.estado || '';
+        const sim = est === 'RETARDO' ? '+' + x.minutos_tarde : est ? ESTADO_DIA[est][1] : '';
+        const tip = [est ? ESTADO_DIA[est][0] : 'Sin registro', x.entrada ? 'Entrada ' + horaDe(x.entrada) : '', x.salida ? 'Salida ' + horaDe(x.salida) : '', x.manual ? 'Registro manual' : '', x.notas || ''].filter(Boolean).join(' · ');
+        return `<td class="asis-c e-${est || 'NADA'} ${x.manual ? 'manual' : ''}" data-e="${esc(e.id)}" data-d="${d}" title="${esc(tip)}">${sim}</td>`;
+      }).join('')}
+      <td class="num">${e.conteo.RETARDO || ''}</td><td class="num">${(e.conteo.FALTA + e.conteo.INCAPACIDAD) || ''}</td>
+      <td class="num">${dinero(n.base)}</td><td class="num txt-error">${desc ? '−' + dinero(desc) : '—'}</td><td class="num txt-ok">${mas ? '+' + dinero(mas) : '—'}</td>
+      <td class="num"><b>${dinero(n.total)}</b></td></tr>`;
+  };
+  const cuerpo = Object.keys(grupos).sort((a, b) => almNombre(a).localeCompare(almNombre(b))).map(a =>
+    `<tr class="asis-grupo"><td colspan="${cols}">${esc(almNombre(a) || 'Sin sucursal')}</td></tr>` + grupos[a].sort(porNombre).map(fila).join('')).join('');
+  t.innerHTML = r.empleados.length ? `<div class="tabla-cont asis-cont"><table class="tabla asis">
+    <thead><tr><th class="asis-nom">Empleado</th>${r.dias.map(d => `<th class="asis-d ${d === r.hoy ? 'hoy' : ''} ${[0, 6].includes(diaSem(d)) ? 'finde' : ''}"><small>${LETRA_DIA[diaSem(d)]}</small>${Number(d.slice(8))}</th>`).join('')}
+      <th class="num">Ret.</th><th class="num">Faltas</th><th class="num">Salario fijo</th><th class="num">Descuentos</th><th class="num">Bonos y prima</th><th class="num">Salario final</th></tr></thead>
+    <tbody>${cuerpo}</tbody>
+    <tfoot><tr class="tot"><td colspan="${r.dias.length + 3}">Total de la quincena</td><td class="num">${dinero(tot.base)}</td><td class="num">−${dinero(tot.desc)}</td><td class="num">+${dinero(tot.mas)}</td><td class="num">${dinero(tot.total)}</td></tr></tfoot></table></div>
+    <p class="nota">Toca un día para justificarlo o corregir horas; toca un nombre para ver el detalle de su pago, bonos y descuentos. ${r.hasta >= r.hoy ? 'La quincena no ha terminado: los importes son preliminares.' : ''}</p>`
+    : '<p class="vacio">No hay empleados con esos filtros.</p>';
+  t.onclick = e => {
+    const td = e.target.closest('td[data-d]'), b = e.target.closest('[data-emp]');
+    if (td) dlgDiaAsistencia(r.empleados.find(x => x.id === td.dataset.e), td.dataset.d);
+    if (b) dlgDetallePago(r.empleados.find(x => x.id === b.dataset.emp), r);
+  };
+  const mover = dir => {
+    if (dir < 0) [PER.desde, PER.hasta] = quincenaDe(sumarDiasL(PER.desde, -1));
+    else [PER.desde, PER.hasta] = quincenaDe(sumarDiasL(PER.hasta, 1));
+    pePintarAsistencia(c);
+  };
+  $('#as-ant', c).onclick = () => mover(-1);
+  $('#as-sig', c).onclick = () => mover(1);
+  $('#as-hoy', c).onclick = () => { PER.desde = ''; pePintarAsistencia(c); };
+  const fa = $('#as-alm', c);
+  if (fa) fa.onchange = () => { PER.alm = fa.value; pePintarAsistencia(c); };
+  $('#as-emp', c).onchange = e => { PER.emp = e.target.value; pePintarAsistencia(c); };
+}
+
+function dlgDiaAsistencia(emp, dia) {
+  const x = emp.dias[dia] || {};
+  const d = abrirModal(`${emp.nombre} · ${NOMBRE_DIA[diaSem(dia)]} ${fechaCorta(dia)}`, `
+    <form id="fdia" class="form">
+      <p>Ahora: <b>${x.estado ? ESTADO_DIA[x.estado][0] : 'Sin registro'}</b>${x.minutos_tarde ? ` (${x.minutos_tarde} min tarde)` : ''}${x.manual ? ' · registrado a mano' : ''}</p>
+      <label>Marcar el día como<select name="estado"><option value="AUTO">Automático (según las checadas y el horario)</option>
+        ${['A_TIEMPO', 'RETARDO', 'FALTA', 'PERMISO', 'INCAPACIDAD', 'DESCANSO'].map(k => `<option value="${k}" ${x.manual && x.estado === k ? 'selected' : ''}>${ESTADO_DIA[k][0]}</option>`).join('')}</select></label>
+      <div class="fila2"><label>Hora de entrada<input name="entrada" type="time" value="${horaDe(x.entrada)}"></label><label>Hora de salida<input name="salida" type="time" value="${horaDe(x.salida)}"></label></div>
+      <label>Nota<input name="notas" value="${esc(x.notas && !String(x.notas).startsWith('op:') ? x.notas : '')}" placeholder="Ej. Cita médica, olvidó checar"></label>
+      <p class="nota">Las vacaciones se registran en Solicitudes para que se descuenten de sus días y se pague la prima.</p>
+      <p class="msg" id="fdia-msg"></p>
+      <div class="pie"><button type="button" class="btn sec" data-cerrar>Cancelar</button><button class="btn" type="submit">Guardar</button></div>
+    </form>`);
+  const f = $('#fdia', d);
+  f.onsubmit = async ev => {
+    ev.preventDefault();
+    try {
+      await conCarga('Guardando…', () => api('guardarAsistencia', { empleado_id: emp.id, dia, estado: f.estado.value, entrada: f.entrada.value, salida: f.salida.value, notas: f.notas.value.trim() }));
+      cerrarModal();
+      toast('Día actualizado.', 'ok');
+      PER.repintar(false);
+    } catch (e) { $('#fdia-msg', d).textContent = e.message; }
+  };
+}
+
+// Detalle del pago de una persona en el rango, con bonos y descuentos
+function dlgDetallePago(emp, r) {
+  const n = emp.nomina, c = emp.conteo;
+  const f = (t, v, cls = '') => `<span>${t}</span><span class="${cls}">${v}</span>`;
+  const d = abrirModal(`${emp.nombre} · ${rangoTxt(r.desde, r.hasta)}`, `<div class="form">
+    <div class="dos-col"><div class="col">
+      <div class="corte-res">${f('Salario diario', dinero(n.salario_diario))}${f('Tipo de pago', TIPO_PAGO_TXT[emp.tipo_pago])}
+        ${f('A tiempo', c.A_TIEMPO)}${f('Retardos', c.RETARDO + (emp.retardos_falta ? ` (= ${emp.retardos_falta} falta)` : ''))}${f('Faltas', c.FALTA)}
+        ${f('Permisos', c.PERMISO)}${f('Incapacidad', c.INCAPACIDAD)}${f('Vacaciones', c.VACACIONES)}${f('Descansos', c.DESCANSO)}</div>
+    </div><div class="col">
+      <div class="corte-res">${f('Salario fijo', dinero(n.base))}${f('− Faltas', dinero(n.desc_faltas), 'txt-error')}${f('− Retardos', dinero(n.desc_retardos), 'txt-error')}
+        ${f('− Adelantos', dinero(n.adelantos), 'txt-error')}${f('− Otros descuentos', dinero(n.otros_descuentos), 'txt-error')}
+        ${f('+ Bonos', dinero(n.bonos), 'txt-ok')}${f('+ Bono de puntualidad', dinero(n.bono_puntualidad), 'txt-ok')}${f('+ Bonos de metas', dinero(n.bono_ventas || 0), 'txt-ok')}${f('+ Prima vacacional', dinero(n.prima_vacacional), 'txt-ok')}
+        <b>Salario final</b><b>${dinero(n.total)}</b></div>
+      ${n.preliminar ? '<p class="nota">Preliminar: el periodo no ha terminado.</p>' : ''}
+    </div></div>
+    ${(emp.bonos_detalle || []).length ? `<h3>Bonos ganados</h3><ul class="lista">${emp.bonos_detalle.map(b => `<li><span><b class="txt-ok">+${dinero(b.monto)}</b> ${esc(b.nombre)}
+      <small>${rangoTxt(b.inicio, b.fin)}${b.logro !== null ? ` · logró ${b.medida === 'PIEZAS' ? numero(b.logro) + ' pzas' : dinero(b.logro)} de ${b.medida === 'PIEZAS' ? numero(b.meta) + ' pzas' : dinero(b.meta)}` : ''}</small></span></li>`).join('')}</ul>` : ''}
+    <h3>Bonos y descuentos a mano</h3>
+    <ul class="lista">${emp.incidencias.length ? emp.incidencias.map(i => `<li><span><b class="${i.tipo === 'BONO' ? 'txt-ok' : 'txt-error'}">${i.tipo === 'BONO' ? '+' : '−'}${dinero(i.monto)}</b> ${esc(i.concepto)} <small>${fechaCorta(i.dia)}</small></span>
+      <button type="button" class="btn mini sec" data-quitar="${esc(i.id)}">Quitar</button></li>`).join('') : '<li class="nota">Sin bonos ni descuentos registrados.</li>'}</ul>
+    <form id="finc" class="fila-form">
+      <select name="tipo"><option value="BONO">Bono</option><option value="DESCUENTO">Descuento</option></select>
+      <input name="monto" type="number" min="0" step="0.01" placeholder="Monto" required inputmode="decimal">
+      <input name="concepto" placeholder="Concepto (ej. Meta de ventas, faltante de caja)" required>
+      <input name="dia" type="date" value="${r.hoy >= r.desde && r.hoy <= r.hasta ? r.hoy : r.hasta}" min="${r.desde}" max="${r.hasta}">
+      <button class="btn">Agregar</button></form>
+    <p class="msg" id="finc-msg"></p>
+    <div class="pie"><button type="button" class="btn sec" id="dp-vac">Registrar vacaciones</button><button type="button" class="btn sec" id="dp-ade">Registrar adelanto</button>
+      <button type="button" class="btn" data-cerrar>Listo</button></div></div>`, 'medio');
+  $('#finc', d).onsubmit = async ev => {
+    ev.preventDefault();
+    const fi = ev.target;
+    try {
+      await conCarga('Guardando…', () => api('guardarIncidencia', { empleado_id: emp.id, tipo: fi.tipo.value, monto: fi.monto.value, concepto: fi.concepto.value.trim(), dia: fi.dia.value }));
+      cerrarModal(); toast('Registrado.', 'ok'); PER.repintar(false);
+    } catch (e) { $('#finc-msg', d).textContent = e.message; }
+  };
+  d.addEventListener('click', async e => {
+    const q = e.target.closest('[data-quitar]');
+    if (!q || !confirm('¿Quitar este registro?')) return;
+    try { await conCarga('Quitando…', () => api('eliminarIncidencia', { id: q.dataset.quitar })); cerrarModal(); PER.repintar(false); } catch (er) { toast(er.message, 'error'); }
+  });
+  $('#dp-vac', d).onclick = () => dlgVacacionesAdmin(emp.id);
+  $('#dp-ade', d).onclick = () => dlgAdelantoAdmin(emp.id);
+}
+
+/* ---- Nómina por periodo de pago ---- */
+async function pePintarNomina(c) {
+  if (!PER.nfecha) PER.nfecha = hoyLocal();
+  c.innerHTML = `<div class="filtros">
+      <select id="no-tipo">${Object.entries(TIPO_PAGO_TXT).map(([k, t]) => `<option value="${k}" ${PER.ntipo === k ? 'selected' : ''}>Pago ${t.toLowerCase()}</option>`).join('')}</select>
+      <div class="nav-periodo"><button type="button" class="btn sec mini" id="no-ant">‹</button><b id="no-rango"></b><button type="button" class="btn sec mini" id="no-sig">›</button></div>
+      ${filtrosSucursal('no-alm', PER.alm)}
+    </div><div id="no-tabla"></div>`;
+  const t = $('#no-tabla', c);
+  const r = await pedir(t, 'Calculando nómina…', () => api('nomina', { tipo_pago: PER.ntipo, fecha: PER.nfecha, almacen_id: PER.alm }));
+  if (!r) return;
+  $('#no-rango', c).textContent = rangoTxt(r.desde, r.hasta);
+  const filas = r.filas.slice().sort((a, b) => almNombre(a.almacen_id).localeCompare(almNombre(b.almacen_id)) || a.nombre.localeCompare(b.nombre));
+  const s = k => filas.reduce((x, f) => x + (Number(f[k]) || 0), 0);
+  const prelim = !r.cerrada && r.hasta >= hoyLocal();
+  const pagado = f => f.pagado && f.pagado !== '' && f.pagado !== false;
+  t.innerHTML = filas.length ? `
+    <p>${r.cerrada ? `<span class="est est-RECIBIDA">Nómina cerrada</span> ${filas.filter(pagado).length} de ${filas.length} pagados.` : prelim ? '<span class="est est-ENVIADA">Preliminar</span> El periodo aún no termina.' : '<span class="est est-ATRASADA">Por cerrar</span> El periodo ya terminó.'}</p>
+    <div class="tabla-cont"><table class="tabla nomina">
+      <thead><tr>${r.cerrada ? '<th class="col-sel"><input type="checkbox" id="no-todos"></th>' : ''}<th>Empleado</th><th>Sucursal</th><th class="num">Días</th><th class="num">Faltas</th><th class="num">Ret.</th>
+        <th class="num">Salario fijo</th><th class="num">− Faltas</th><th class="num">− Retardos</th><th class="num">+ Bonos</th><th class="num">+ Puntualidad</th><th class="num">+ Metas</th><th class="num">+ Prima vac.</th>
+        <th class="num">− Adelantos</th><th class="num">− Otros</th><th class="num">Salario final</th>${r.cerrada ? '<th>Pago</th>' : ''}</tr></thead>
+      <tbody>${filas.map(f => `<tr class="clic" data-f="${esc(f.id || f.empleado_id)}">${r.cerrada ? `<td class="col-sel"><input type="checkbox" data-sel="${esc(f.id)}" ${pagado(f) ? 'disabled' : ''}></td>` : ''}
+        <td><b>${esc(f.nombre)}</b><small>#${esc(f.numero)}</small></td><td>${esc(almNombre(f.almacen_id))}</td><td class="num">${f.dias_pagados}</td><td class="num">${f.faltas || ''}</td><td class="num">${f.retardos || ''}</td>
+        <td class="num">${dinero(f.base)}</td><td class="num txt-error">${Number(f.desc_faltas) ? dinero(f.desc_faltas) : ''}</td><td class="num txt-error">${Number(f.desc_retardos) ? dinero(f.desc_retardos) : ''}</td>
+        <td class="num txt-ok">${Number(f.bonos) ? dinero(f.bonos) : ''}</td><td class="num txt-ok">${Number(f.bono_puntualidad) ? dinero(f.bono_puntualidad) : ''}</td><td class="num txt-ok">${Number(f.bono_ventas) ? dinero(f.bono_ventas) : ''}</td><td class="num txt-ok">${Number(f.prima_vacacional) ? dinero(f.prima_vacacional) : ''}</td>
+        <td class="num txt-error">${Number(f.adelantos) ? dinero(f.adelantos) : ''}</td><td class="num txt-error">${Number(f.otros_descuentos) ? dinero(f.otros_descuentos) : ''}</td>
+        <td class="num"><b>${dinero(f.total)}</b></td>${r.cerrada ? `<td>${pagado(f) ? `<span class="est est-RECIBIDA">Pagado</span>` : '<span class="est est-ENVIADA">Pendiente</span>'}</td>` : ''}</tr>`).join('')}</tbody>
+      <tfoot><tr class="tot">${r.cerrada ? '<td></td>' : ''}<td colspan="5">Total (${filas.length})</td><td class="num">${dinero(s('base'))}</td><td class="num">${dinero(s('desc_faltas'))}</td><td class="num">${dinero(s('desc_retardos'))}</td>
+        <td class="num">${dinero(s('bonos'))}</td><td class="num">${dinero(s('bono_puntualidad'))}</td><td class="num">${dinero(s('bono_ventas'))}</td><td class="num">${dinero(s('prima_vacacional'))}</td><td class="num">${dinero(s('adelantos'))}</td>
+        <td class="num">${dinero(s('otros_descuentos'))}</td><td class="num">${dinero(s('total'))}</td>${r.cerrada ? '<td></td>' : ''}</tr></tfoot></table></div>
+    <div class="acciones">
+      ${!r.cerrada && esGeneral() ? '<button type="button" class="btn" id="no-cerrar">Cerrar nómina</button>' : ''}
+      ${r.cerrada && esGeneral() ? '<button type="button" class="btn" id="no-pagar">Marcar seleccionados como pagados</button><button type="button" class="btn sec" id="no-reabrir">Reabrir</button>' : ''}
+      <button type="button" class="btn sec" id="no-recibos">Imprimir recibos</button><button type="button" class="btn sec" id="no-excel">Exportar a Excel</button></div>
+    <p class="nota">Al cerrar, los importes quedan fijos y los adelantos aprobados del periodo se marcan como descontados.</p>`
+    : `<p class="vacio">No hay empleados con pago ${TIPO_PAGO_TXT[PER.ntipo].toLowerCase()} en este periodo.</p>`;
+  const mover = dir => {
+    PER.nfecha = dir < 0 ? sumarDiasL(r.desde, -1) : sumarDiasL(r.hasta, 1);
+    pePintarNomina(c);
+  };
+  $('#no-ant', c).onclick = () => mover(-1);
+  $('#no-sig', c).onclick = () => mover(1);
+  $('#no-tipo', c).onchange = e => { PER.ntipo = e.target.value; pePintarNomina(c); };
+  const fa = $('#no-alm', c);
+  if (fa) fa.onchange = () => { PER.alm = fa.value; pePintarNomina(c); };
+  if (!filas.length) return;
+  const bc = $('#no-cerrar', c);
+  if (bc) bc.onclick = async () => {
+    const forzar = prelim;
+    if (!confirm(forzar ? 'El periodo aún no termina. ¿Cerrar la nómina de todos modos con lo registrado hasta hoy?' : `¿Cerrar la nómina del ${rangoTxt(r.desde, r.hasta)} por ${dinero(s('total'))}?`)) return;
+    try { await conCarga('Cerrando nómina…', () => api('cerrarNomina', { tipo_pago: PER.ntipo, fecha: r.desde, forzar })); toast('Nómina cerrada.', 'ok'); PER.base = null; pePintarNomina(c); } catch (e) { toast(e.message, 'error'); }
+  };
+  const bp = $('#no-pagar', c);
+  if (bp) bp.onclick = async () => {
+    const ids = $$('[data-sel]:checked', c).map(x => x.dataset.sel);
+    if (!ids.length) { toast('Selecciona a quién se le pagó.', ''); return; }
+    try { const x = await conCarga('Guardando…', () => api('pagarNomina', { ids })); toast(`${plural(x.pagados, 'pago')} ${x.pagados === 1 ? 'registrado' : 'registrados'}.`, 'ok'); pePintarNomina(c); } catch (e) { toast(e.message, 'error'); }
+  };
+  const tt = $('#no-todos', c);
+  if (tt) tt.onchange = () => $$('[data-sel]:not(:disabled)', c).forEach(x => { x.checked = tt.checked; });
+  const br = $('#no-reabrir', c);
+  if (br) br.onclick = async () => {
+    if (!confirm('¿Reabrir esta nómina? Se recalculará con los datos actuales.')) return;
+    try { await conCarga('Reabriendo…', () => api('reabrirNomina', { tipo_pago: PER.ntipo, desde: r.desde })); toast('Nómina reabierta.', 'ok'); pePintarNomina(c); } catch (e) { toast(e.message, 'error'); }
+  };
+  $('#no-recibos', c).onclick = () => imprimirRecibosNomina(r, filas);
+  $('#no-excel', c).onclick = () => {
+    const enc = ['Número', 'Empleado', 'Sucursal', 'Días pagados', 'Faltas', 'Retardos', 'Salario fijo', 'Desc. faltas', 'Desc. retardos', 'Bonos', 'Bono puntualidad', 'Bonos de metas',
+      'Prima vacacional', 'Adelantos', 'Otros descuentos', 'Salario final', 'Pagado'];
+    const n = v => Number(v) || 0;
+    Excel.descargar(Excel.crearXlsx([{ nombre: 'Nómina', encabezado: true, anchos: [9, 28, 18, 8, 7, 7, 13, 12, 12, 11, 12, 12, 12, 12, 12, 13, 10],
+      filas: [enc].concat(filas.map(f => [f.numero, f.nombre, almNombre(f.almacen_id), n(f.dias_pagados), n(f.faltas), n(f.retardos), n(f.base), n(f.desc_faltas), n(f.desc_retardos),
+        n(f.bonos), n(f.bono_puntualidad), n(f.bono_ventas), n(f.prima_vacacional), n(f.adelantos), n(f.otros_descuentos), n(f.total), pagado(f) ? 'Sí' : 'No'])) }]),
+      `nomina-${PER.ntipo.toLowerCase()}-${r.desde}.xlsx`);
+  };
+  $('table.nomina tbody', c).onclick = e => {
+    if (e.target.closest('.col-sel')) return;
+    const tr = e.target.closest('tr[data-f]');
+    if (!tr) return;
+    const f = filas.find(x => (x.id || x.empleado_id) === tr.dataset.f);
+    imprimirRecibosNomina(r, [f], true);
+  };
+}
+
+// Recibos de nómina (uno por hoja) para imprimir y firmar
+function imprimirRecibosNomina(r, filas, verAntes = false) {
+  const emp = (CMP.datos && CMP.datos.empresa) || {};
+  const fila = (t, v) => (Number(v) ? `<tr><td>${t}</td><td class="n">${dinero(v)}</td></tr>` : '');
+  const html = filas.map((f, i) => `<div style="${i ? 'page-break-before:always;' : ''}">
+    <div class="cab"><div style="display:flex;gap:10px;align-items:center"><img src="${esc(logoSrc())}" alt=""><div><h1>${esc(emp.nombre || CFG.NOMBRE)}</h1><div>Recibo de nómina</div></div></div>
+      <div style="text-align:right"><div class="folio">${TIPO_PAGO_TXT[r.tipo_pago]}</div><div>${rangoTxt(r.desde, r.hasta)}</div></div></div>
+    <div class="cajas"><div class="caja"><h3>Empleado</h3><b>${esc(f.nombre)}</b><br>Número ${esc(f.numero)} · ${esc(almNombre(f.almacen_id))}</div>
+      <div class="caja"><h3>Días</h3>Pagados: ${f.dias_pagados} · Faltas: ${f.faltas || 0} · Retardos: ${f.retardos || 0}${f.vacaciones ? ' · Vacaciones: ' + f.vacaciones : ''}<br>Salario diario: ${dinero(f.salario_diario)}</div></div>
+    <div class="cajas"><div class="caja"><h3>Percepciones</h3><table>${fila('Salario fijo', f.base)}${fila('Bonos', f.bonos)}${fila('Bono de puntualidad', f.bono_puntualidad)}${fila('Bonos de metas', f.bono_ventas)}${fila('Prima vacacional', f.prima_vacacional)}</table></div>
+      <div class="caja"><h3>Deducciones</h3><table>${fila('Faltas', f.desc_faltas)}${fila('Retardos', f.desc_retardos)}${fila('Adelantos de nómina', f.adelantos)}${fila('Otros descuentos', f.otros_descuentos)}</table></div></div>
+    <table><tr class="tot"><td>Neto a pagar</td><td class="n">${dinero(f.total)}</td></tr></table>
+    <div class="firmas"><div>Recibí de conformidad<br>${esc(f.nombre)}</div><div>Entregó</div></div></div>`).join('');
+  if (!verAntes) { imprimirDocumento('Recibos de nómina', html); return; }
+  const d = abrirModal(`Recibo de ${filas[0].nombre}`, `<div class="form"><div class="recibo-prev">${html}</div><div class="pie"><button type="button" class="btn sec" data-cerrar>Cerrar</button><button type="button" class="btn" id="rc-imp">Imprimir</button></div></div>`, 'medio');
+  $('#rc-imp', d).onclick = () => imprimirDocumento('Recibo de nómina', html);
+}
+
+/* ---- Solicitudes de vacaciones y adelantos ---- */
+function pePintarSolicitudes(c) {
+  const B = PER.base;
+  const vac = B.vacaciones.slice().sort((a, b) => (a.estado === 'SOLICITADA') - (b.estado === 'SOLICITADA') || String(a.desde).localeCompare(b.desde)).reverse();
+  const ade = B.adelantos.slice().sort((a, b) => (a.estado === 'SOLICITADO') - (b.estado === 'SOLICITADO') || String(a.dia).localeCompare(b.dia)).reverse();
+  const emp = id => B.empleados.find(e => e.id === id) || {};
+  c.innerHTML = `<div class="acciones"><button type="button" class="btn sec" id="so-vac">Registrar vacaciones</button><button type="button" class="btn sec" id="so-ade">Registrar adelanto</button></div>
+    <div class="dos-col">
+    <div class="col panel"><h3>Vacaciones</h3>${vac.length ? `<ul class="lista">${vac.map(v => `<li><span><b>${esc(emp(v.empleado_id).nombre || '—')}</b>
+        <small>${fechaCorta(v.desde)} al ${fechaCorta(v.hasta)} · ${plural(v.dias, 'día')}${v.estado === 'SOLICITADA' ? ` · le quedan ${(emp(v.empleado_id).vacaciones || {}).disponibles} días` : ''}${v.notas ? ' · ' + esc(v.notas) : ''}</small>
+        <small><span class="est est-${v.estado === 'SOLICITADA' ? 'ENVIADA' : v.estado === 'APROBADA' ? 'RECIBIDA' : 'CANCELADA'}">${ESTADO_SOL[v.estado]}</span>${v.origen === 'CHECADOR' ? ' · pedida en el checador' : ''}</small></span>
+        <span class="acciones">${v.estado === 'SOLICITADA' ? `<button type="button" class="btn mini" data-v="${esc(v.id)}" data-a="APROBAR">Aprobar</button><button type="button" class="btn mini sec" data-v="${esc(v.id)}" data-a="RECHAZAR">Rechazar</button>`
+          : v.estado === 'APROBADA' && v.desde >= hoyLocal() ? `<button type="button" class="btn mini sec" data-v="${esc(v.id)}" data-a="CANCELAR">Cancelar</button>` : ''}</span></li>`).join('')}</ul>` : '<p class="vacio">Sin solicitudes.</p>'}</div>
+    <div class="col panel"><h3>Adelantos de nómina</h3>${ade.length ? `<ul class="lista">${ade.map(a => `<li><span><b>${esc(emp(a.empleado_id).nombre || '—')}</b> · ${dinero(a.monto)}
+        <small>${fechaCorta(a.dia)}${a.motivo ? ' · ' + esc(a.motivo) : ''}</small>
+        <small><span class="est est-${a.estado === 'SOLICITADO' ? 'ENVIADA' : ['APROBADO', 'DESCONTADO'].includes(a.estado) ? 'RECIBIDA' : 'CANCELADA'}">${ESTADO_SOL[a.estado]}</span>${a.origen === 'CHECADOR' ? ' · pedido en el checador' : ''}</small></span>
+        <span class="acciones">${a.estado === 'SOLICITADO' ? `<button type="button" class="btn mini" data-ad="${esc(a.id)}" data-a="APROBAR">Aprobar</button><button type="button" class="btn mini sec" data-ad="${esc(a.id)}" data-a="RECHAZAR">Rechazar</button>`
+          : a.estado === 'APROBADO' ? `<button type="button" class="btn mini sec" data-ad="${esc(a.id)}" data-a="CANCELAR">Cancelar</button>` : ''}</span></li>`).join('')}</ul>` : '<p class="vacio">Sin solicitudes.</p>'}
+      <p class="nota">Tope: ${B.reglas.tope_adelanto}% del sueldo del periodo, ${B.reglas.adelantos_por_periodo || 'sin límite de'} adelanto(s) por periodo, después de ${B.reglas.antiguedad_adelanto} días de trabajo. Se descuenta en la nómina del periodo.</p></div>
+    </div>`;
+  $('#so-vac', c).onclick = () => dlgVacacionesAdmin();
+  $('#so-ade', c).onclick = () => dlgAdelantoAdmin();
+  c.onclick = async e => {
+    const b = e.target.closest('[data-a]');
+    if (!b) return;
+    const vac = !!b.dataset.v;
+    if (b.dataset.a !== 'APROBAR' && !confirm(b.dataset.a === 'CANCELAR' ? '¿Cancelar?' : '¿Rechazar la solicitud?')) return;
+    try {
+      await conCarga('Guardando…', () => api(vac ? 'resolverVacaciones' : 'resolverAdelanto', { id: b.dataset.v || b.dataset.ad, accion: b.dataset.a }));
+      toast('Listo.', 'ok');
+      await PER.repintar();
+      sincronizar();
+    } catch (er) { toast(er.message, 'error'); }
+  };
+}
+
+function selectEmpleado(sel = '') {
+  return `<select name="empleado_id" required><option value="">Elige a la persona…</option>${PER.base.empleados.filter(e => e.activo).sort(porNombre)
+    .map(e => `<option value="${esc(e.id)}" ${e.id === sel ? 'selected' : ''}>${esc(e.nombre)}</option>`).join('')}</select>`;
+}
+
+function dlgVacacionesAdmin(empId = '') {
+  const d = abrirModal('Registrar vacaciones', `<form id="fva" class="form">
+    <label>Empleado${selectEmpleado(empId)}</label><p class="nota" id="fva-saldo"></p>
+    <div class="fila2"><label>Desde<input name="desde" type="date" required></label><label>Hasta<input name="hasta" type="date" required></label></div>
+    <label>Notas<input name="notas"></label>
+    <label class="chk"><input type="checkbox" name="aprobar" checked> Aprobar de una vez</label>
+    <p class="msg" id="fva-msg"></p>
+    <div class="pie"><button type="button" class="btn sec" data-cerrar>Cancelar</button><button class="btn" type="submit">Guardar</button></div></form>`);
+  const f = $('#fva', d);
+  const saldo = () => {
+    const e = PER.base.empleados.find(x => x.id === f.empleado_id.value);
+    const v = e && e.vacaciones;
+    $('#fva-saldo', d).textContent = !v ? '' : v.anios < 1 ? `Aún no cumple un año (al cumplirlo tendrá ${v.derecho_al_cumplir} días).`
+      : `${v.anios} año(s) de antigüedad: ${v.derecho} días por ley · tomados ${v.tomados} · por aprobar ${v.pendientes} · disponibles ${v.disponibles}. Prima vacacional ${PER.base.reglas.prima_vacacional}%.`;
+  };
+  f.empleado_id.onchange = saldo; saldo();
+  f.onsubmit = async ev => {
+    ev.preventDefault();
+    try {
+      await conCarga('Guardando…', async () => {
+        const v = await api('solicitarVacaciones', { empleado_id: f.empleado_id.value, desde: f.desde.value, hasta: f.hasta.value, notas: f.notas.value.trim() });
+        if (f.aprobar.checked) await api('resolverVacaciones', { id: v.id, accion: 'APROBAR' });
+      });
+      cerrarModal(); toast('Vacaciones registradas.', 'ok'); PER.repintar();
+    } catch (e) { $('#fva-msg', d).textContent = e.message; }
+  };
+}
+
+function dlgAdelantoAdmin(empId = '') {
+  const d = abrirModal('Registrar adelanto de nómina', `<form id="fad" class="form">
+    <label>Empleado${selectEmpleado(empId)}</label><p class="nota" id="fad-disp"></p>
+    <div class="fila2"><label>Monto<input name="monto" type="number" min="0" step="0.01" required inputmode="decimal"></label><label>Motivo<input name="motivo"></label></div>
+    <label class="chk"><input type="checkbox" name="aprobar" checked> Aprobar de una vez</label>
+    <p class="msg" id="fad-msg"></p>
+    <div class="pie"><button type="button" class="btn sec" data-cerrar>Cancelar</button><button class="btn" type="submit">Guardar</button></div></form>`);
+  const f = $('#fad', d);
+  const disp = () => {
+    const e = PER.base.empleados.find(x => x.id === f.empleado_id.value);
+    const a = e && e.adelanto;
+    $('#fad-disp', d).textContent = !a ? '' : a.motivo || `Puede pedir hasta ${dinero(a.disponible)} (${a.tope}% de ${dinero(a.sueldo_periodo)}; ya pidió ${dinero(a.usado)} en el periodo del ${fechaCorta(a.periodo.inicio)} al ${fechaCorta(a.periodo.fin)}).`;
+    if (a) f.monto.max = a.disponible;
+  };
+  f.empleado_id.onchange = disp; disp();
+  f.onsubmit = async ev => {
+    ev.preventDefault();
+    try {
+      await conCarga('Guardando…', async () => {
+        const a = await api('solicitarAdelanto', { empleado_id: f.empleado_id.value, monto: f.monto.value, motivo: f.motivo.value.trim() });
+        if (f.aprobar.checked) await api('resolverAdelanto', { id: a.id, accion: 'APROBAR' });
+      });
+      cerrarModal(); toast('Adelanto registrado.', 'ok'); PER.repintar();
+    } catch (e) { $('#fad-msg', d).textContent = e.message; }
+  };
+}
+
+/* ---- Bonos: puntualidad, meta de ventas y promoción de un producto ---- */
+const TIPO_BONO = { PUNTUALIDAD: 'Puntualidad', VENTAS: 'Meta de ventas', PRODUCTO: 'Promover un producto' };
+const DESTINO_BONO = { PERSONA: 'Una persona', GRUPO: 'Grupo de personas', PRESENTES: 'Todos los presentes', TURNO: 'Turno completo' };
+const PERIODO_BONO = { DIARIO: 'Por día', SEMANAL: 'Por semana', QUINCENAL: 'Por quincena' };
+const fmtMeta = (v, medida) => (medida === 'PIEZAS' ? numero(v) + ' pzas' : dinero(v));
+
+function resumenBono(b) {
+  const B = PER.base;
+  const quien = b.destino === 'PERSONA' || b.destino === 'GRUPO' ? b.empleados.map(empNombre).join(', ')
+    : b.destino === 'TURNO' ? 'Turno ' + ((B.horarios.find(h => h.id === b.horario_id) || {}).nombre || '—') : 'Todos los presentes';
+  const reglas = [b.sin_faltas ? 'sin faltas' : '', b.sin_retardos ? 'sin retardos' : '', b.meses_min ? `${b.meses_min}+ meses de antigüedad` : ''].filter(Boolean);
+  const meta = b.tipo === 'PUNTUALIDAD' ? 'Llegar a tiempo todos los días, sin faltas'
+    : `Meta ${fmtMeta(b.meta, b.medida)}${b.tipo === 'PRODUCTO' ? ' de ' + ((S.idx.prod[b.producto_id] || {}).nombre || 'producto') : ' de venta'} ${b.medicion === 'PERSONAL' ? 'vendidos por cada persona' : 'de la sucursal'}`;
+  return `${meta} · ${PERIODO_BONO[b.periodo].toLowerCase()} · ${dinero(b.monto)} ${b.reparto === 'REPARTIR' ? 'a repartir' : 'a cada quien'}<br>
+    ${esc(quien)}${b.area ? ' · área ' + esc(b.area) : ''}${b.almacen_id ? ' · ' + esc(almNombre(b.almacen_id)) : ''}${reglas.length ? ' · solo ' + reglas.join(', ') : ''}
+    ${b.desde || b.hasta ? `· vigente ${b.desde ? 'del ' + fechaCorta(b.desde) : ''} ${b.hasta ? 'al ' + fechaCorta(b.hasta) : ''}` : ''}`;
+}
+
+async function pePintarBonos(c) {
+  if (!PER.bfecha) PER.bfecha = hoyLocal();
+  c.innerHTML = `<div class="filtros"><div class="nav-periodo"><button type="button" class="btn sec mini" id="bo-ant">‹</button><b id="bo-rango"></b><button type="button" class="btn sec mini" id="bo-sig">›</button></div>
+    <button type="button" class="btn" id="bo-nuevo">Nuevo bono</button></div><div id="bo-res"></div>`;
+  $('#bo-nuevo', c).onclick = () => dlgBono(null);
+  const res = $('#bo-res', c);
+  const r = await pedir(res, 'Calculando bonos…', () => api('bonos', { fecha: PER.bfecha }));
+  if (!r) return;
+  $('#bo-rango', c).textContent = 'Quincena ' + rangoTxt(r.desde, r.hasta);
+  $('#bo-ant', c).onclick = () => { PER.bfecha = sumarDiasL(r.desde, -1); pePintarBonos(c); };
+  $('#bo-sig', c).onclick = () => { PER.bfecha = sumarDiasL(r.hasta, 1); pePintarBonos(c); };
+  if (!r.bonos.length) {
+    res.innerHTML = `<p class="vacio">No hay bonos. Son opcionales: crea uno de puntualidad, de meta de ventas o para promover un producto.</p>`;
+    return;
+  }
+  const porBono = {};
+  r.resultados.forEach(x => (porBono[x.bono_id] = porBono[x.bono_id] || []).push(x));
+  res.innerHTML = `<div class="bonos">${r.bonos.sort((a, b) => (b.activo - a.activo) || a.nombre.localeCompare(b.nombre)).map(b => {
+    const rs = porBono[b.id] || [];
+    const total = rs.reduce((s, x) => s + x.total, 0);
+    const gan = {};
+    rs.forEach(x => x.ganadores.forEach(g => { gan[g.empleado_id] = (gan[g.empleado_id] || 0) + g.monto; }));
+    const avance = b.tipo === 'PUNTUALIDAD' ? '' : b.periodo === 'DIARIO'
+      ? `<p><b>${rs.filter(x => x.grupos.some(g => g.alcanzada)).length}</b> de ${rs.length} días con meta cumplida</p>`
+      : rs.map(x => `<div class="avance-per"><small>${rangoTxt(x.inicio, x.fin)}${x.terminado ? '' : ' · en curso'}</small>${x.grupos.filter(g => g.logro !== null).map(g => {
+          const nom = b.medicion === 'PERSONAL' ? empNombre(g.clave) : almNombre(g.clave) || 'Todas';
+          return `<div class="avance"><span>${esc(nom)}</span><div class="barra ${g.alcanzada ? 'lleno' : ''}"><i style="width:${Math.min(100, Math.round(g.logro / x.meta * 100))}%"></i></div>
+            <small>${fmtMeta(g.logro, x.medida)} de ${fmtMeta(x.meta, x.medida)}${g.alcanzada ? ' ✓' : ''}</small></div>`;
+        }).join('') || '<p class="nota">Sin participantes.</p>'}</div>`).join('');
+    return `<div class="panel bono ${b.activo ? '' : 'inactivo'}"><div class="titulo"><h3>${esc(b.nombre)}</h3><span class="chip-al al-${b.tipo === 'PUNTUALIDAD' ? 'ok' : b.tipo === 'VENTAS' ? 'aviso' : 'gris'}">${TIPO_BONO[b.tipo]}</span></div>
+      <p class="nota">${resumenBono(b)}</p>${b.activo ? '' : '<p class="nota"><b>Inactivo</b></p>'}
+      ${avance}
+      <p>Ganado en la quincena: <b>${dinero(total)}</b>${Object.keys(gan).length ? ` · ${Object.entries(gan).map(([id, m]) => `${esc(empNombre(id))} ${dinero(m)}`).join(', ')}` : ''}</p>
+      <div class="acciones"><button type="button" class="btn mini sec" data-ed="${esc(b.id)}">Editar</button></div></div>`;
+  }).join('')}</div>
+  <p class="nota">Cada bono se paga en la nómina en la que termina su periodo. Solo lo gana quien trabajó al menos un día del periodo y cumple las reglas. Los importes de la quincena en curso son preliminares.</p>`;
+  res.onclick = e => { const x = e.target.closest('[data-ed]'); if (x) dlgBono(r.bonos.find(b => b.id === x.dataset.ed)); };
+}
+
+function dlgBono(b) {
+  const B = PER.base, nuevo = !b;
+  b = b || { tipo: 'VENTAS', monto: '', reparto: 'CADA_UNO', meta: '', medida: 'IMPORTE', medicion: 'SUCURSAL', periodo: 'QUINCENAL', destino: 'PRESENTES',
+    empleados: [], almacen_id: esGeneral() ? '' : S.usuario.almacen_id, area: '', sin_faltas: true, sin_retardos: false, meses_min: 0, activo: true };
+  const emps = B.empleados.filter(e => e.activo).sort(porNombre);
+  const alms = S.catalogo.almacenes.filter(a => esActivo(a.activo)).sort(porNombre);
+  const d = abrirModal(nuevo ? 'Nuevo bono' : b.nombre, `<form id="fbo" class="form" autocomplete="off">
+    <div class="dos-col"><div class="col">
+      <label>Nombre<input name="nombre" required value="${esc(b.nombre || '')}" placeholder="Ej. Meta de diciembre, Promo ponche"></label>
+      <label>Tipo de bono<select name="tipo">${Object.entries(TIPO_BONO).map(([k, t]) => `<option value="${k}" ${b.tipo === k ? 'selected' : ''}>${t}</option>`).join('')}</select></label>
+      <div data-si="PRODUCTO"><span class="campo-tit">Producto a promover</span><div id="fbo-prod"></div></div>
+      <div class="fila2" data-si="VENTAS PRODUCTO"><label>Meta<input name="meta" type="number" min="0" step="0.01" value="${esc(b.meta || '')}" inputmode="decimal"></label>
+        <label data-si="PRODUCTO">Medida<select name="medida"><option value="PIEZAS" ${b.medida === 'PIEZAS' ? 'selected' : ''}>Piezas vendidas</option><option value="IMPORTE" ${b.medida !== 'PIEZAS' ? 'selected' : ''}>$ vendido</option></select></label></div>
+      <label data-si="VENTAS PRODUCTO">Cuenta la venta de<select name="medicion"><option value="SUCURSAL">La sucursal completa</option><option value="PERSONAL" ${b.medicion === 'PERSONAL' ? 'selected' : ''}>Cada persona (lo que cobró con su usuario de caja)</option></select></label>
+      <div class="fila2"><label>Monto del bono ($)<input name="monto" type="number" min="0" step="0.01" required value="${esc(b.monto || '')}" inputmode="decimal"></label>
+        <label>Se da<select name="reparto"><option value="CADA_UNO">A cada persona que cumple</option><option value="REPARTIR" ${b.reparto === 'REPARTIR' ? 'selected' : ''}>Repartido entre quienes cumplen</option></select></label></div>
+      <label>Se mide y se paga<select name="periodo">${Object.entries(PERIODO_BONO).map(([k, t]) => `<option value="${k}" ${b.periodo === k ? 'selected' : ''}>${t}</option>`).join('')}</select></label>
+      <div class="fila2"><label>Vigente desde <small>(opcional)</small><input name="desde" type="date" value="${esc(b.desde || '')}"></label><label>Hasta<input name="hasta" type="date" value="${esc(b.hasta || '')}"></label></div>
+    </div><div class="col">
+      <label>Aplica a<select name="destino">${Object.entries(DESTINO_BONO).map(([k, t]) => `<option value="${k}" ${b.destino === k ? 'selected' : ''}>${t}</option>`).join('')}</select></label>
+      <label data-dest="PERSONA">Persona<select name="persona"><option value="">Elige…</option>${emps.map(e => `<option value="${esc(e.id)}" ${b.empleados[0] === e.id ? 'selected' : ''}>${esc(e.nombre)}</option>`).join('')}</select></label>
+      <div data-dest="GRUPO" class="grupo-emps">${emps.map(e => `<label class="chk"><input type="checkbox" name="g_${esc(e.id)}" ${b.empleados.includes(e.id) ? 'checked' : ''}> ${esc(e.nombre)} <small>${esc(e.area || '')}</small></label>`).join('')}</div>
+      <label data-dest="TURNO">Turno (horario)<select name="horario_id">${B.horarios.map(h => `<option value="${esc(h.id)}" ${b.horario_id === h.id ? 'selected' : ''}>${esc(h.nombre)} (${esc(h.hora_entrada)}–${esc(h.hora_salida)})</option>`).join('')}</select></label>
+      <div class="fila2"><label>Sucursal<select name="almacen_id" ${esGeneral() ? '' : 'disabled'}><option value="">Todas (cada una con su meta)</option>${alms.map(a => `<option value="${esc(a.id)}" ${b.almacen_id === a.id ? 'selected' : ''}>${esc(a.nombre)}</option>`).join('')}</select></label>
+        <label>Área<input name="area" list="fbo-areas" value="${esc(b.area || '')}" placeholder="Todas las áreas"><datalist id="fbo-areas">${(B.areas || []).map(a => `<option value="${esc(a)}">`).join('')}</datalist></label></div>
+      <fieldset class="reglas-bono"><legend>Solo participan</legend>
+        <label class="chk"><input type="checkbox" name="sin_faltas" ${b.sin_faltas ? 'checked' : ''}> Quienes no faltaron</label>
+        <label class="chk"><input type="checkbox" name="sin_retardos" ${b.sin_retardos ? 'checked' : ''}> Quienes no tuvieron retardos</label>
+        <label class="chk"><input type="checkbox" name="con_meses" ${b.meses_min ? 'checked' : ''}> Quienes tienen al menos <input name="meses_min" type="number" min="1" max="600" value="${b.meses_min || 3}" class="mini-num"> meses</label>
+        <button type="button" class="btn mini sec" id="fbo-todas">Todas las anteriores</button>
+        <p class="nota" data-si="PUNTUALIDAD">El de puntualidad ya exige no faltar ni tener retardos, y no aplica a quien no usa checador.</p>
+      </fieldset>
+      <label>Notas<input name="notas" value="${esc(b.notas || '')}"></label>
+      <label class="chk"><input type="checkbox" name="activo" ${b.activo !== false ? 'checked' : ''}> Activo</label>
+    </div></div>
+    <p class="msg" id="fbo-msg"></p>
+    <div class="pie">${nuevo ? '' : '<button type="button" class="btn peligro izq" id="fbo-del">Eliminar</button>'}<button type="button" class="btn sec" data-cerrar>Cancelar</button><button class="btn" type="submit">Guardar</button></div></form>`, 'medio');
+  const f = $('#fbo', d);
+  const sel = selectorProducto($('#fbo-prod', d));
+  if (b.producto_id && S.idx.prod[b.producto_id]) { sel.elegido = S.idx.prod[b.producto_id]; sel.actualizar(); $('.sel-q', d).hidden = true; $('.elegido', d).hidden = false; }
+  const ver = () => {
+    $$('[data-si]', d).forEach(x => { x.hidden = !x.dataset.si.split(' ').includes(f.tipo.value); });
+    $$('[data-dest]', d).forEach(x => { x.hidden = x.dataset.dest !== f.destino.value; });
+  };
+  f.tipo.onchange = ver; f.destino.onchange = ver; ver();
+  $('#fbo-todas', d).onclick = () => { f.sin_faltas.checked = f.sin_retardos.checked = f.con_meses.checked = true; };
+  f.onsubmit = async ev => {
+    ev.preventDefault();
+    const empleados = f.destino.value === 'PERSONA' ? [f.persona.value].filter(Boolean) : f.destino.value === 'GRUPO' ? emps.filter(e => f['g_' + e.id].checked).map(e => e.id) : [];
+    try {
+      await conCarga('Guardando…', () => api('guardarBono', { bono: { id: b.id || '', nombre: f.nombre.value, tipo: f.tipo.value, monto: f.monto.value, reparto: f.reparto.value,
+        meta: f.meta.value, medida: f.medida.value, medicion: f.medicion.value, producto_id: sel.elegido ? sel.elegido.id : '', periodo: f.periodo.value,
+        destino: f.destino.value, empleados, horario_id: f.horario_id.value, almacen_id: f.almacen_id.value, area: f.area.value.trim(),
+        sin_faltas: f.sin_faltas.checked, sin_retardos: f.sin_retardos.checked, meses_min: f.con_meses.checked ? f.meses_min.value : 0,
+        desde: f.desde.value, hasta: f.hasta.value, notas: f.notas.value, activo: f.activo.checked } }));
+      cerrarModal(); toast('Bono guardado.', 'ok'); PER.repintar();
+    } catch (e) { $('#fbo-msg', d).textContent = e.message; }
+  };
+  const del = $('#fbo-del', d);
+  if (del) del.onclick = async () => {
+    if (!confirm(`¿Eliminar el bono ${b.nombre}? Las nóminas ya cerradas no cambian.`)) return;
+    try { await conCarga('Eliminando…', () => api('eliminarBono', { id: b.id })); cerrarModal(); PER.repintar(); } catch (e) { toast(e.message, 'error'); }
+  };
+}
+
+/* ---- Empleados ---- */
+function pePintarEmpleados(c) {
+  const B = PER.base;
+  const hor = id => (B.horarios.find(h => h.id === id) || {}).nombre || '—';
+  const l = B.empleados.slice().sort((a, b) => (b.activo - a.activo) || Number(a.numero) - Number(b.numero));
+  c.innerHTML = `<div class="acciones"><button type="button" class="btn" id="em-nuevo">Nuevo empleado</button></div>
+    ${l.length ? `<div class="tabla-cont"><table class="tabla"><thead><tr><th>Núm.</th><th>Nombre</th><th>Sucursal</th><th>Ingreso</th><th>Pago</th><th class="num">Salario diario</th><th>Horario</th><th class="num">Vacaciones</th><th>NIP</th></tr></thead>
+      <tbody>${l.map(e => `<tr class="clic ${e.activo ? '' : 'inactivo'}" data-id="${esc(e.id)}"><td>${esc(e.numero)}</td><td><b>${esc(e.nombre)}</b><small>${esc(e.puesto || '')}</small></td>
+        <td>${esc(almNombre(e.almacen_id))}${e.area ? `<small>${esc(e.area)}</small>` : ''}</td><td>${fechaCorta(e.fecha_ingreso)}<small>${e.vacaciones.anios} año(s)</small></td><td>${TIPO_PAGO_TXT[e.tipo_pago]}</td>
+        <td class="num">${dinero(e.salario_diario)}</td><td>${esc(hor(e.horario_id))}</td><td class="num">${e.vacaciones.anios >= 1 ? e.vacaciones.disponibles + ' días' : '—'}</td>
+        <td>${!e.usa_checador ? '<small>No checa (salario fijo)</small>' : e.tiene_pin ? '✓' : '<span class="txt-error">Falta</span>'}</td></tr>`).join('')}</tbody></table></div>
+      <p class="nota">Cada empleado checa con su número y su NIP en la pantalla Checador de cualquier equipo de la sucursal.</p>` : '<p class="vacio">Aún no hay empleados.</p>'}`;
+  $('#em-nuevo', c).onclick = () => dlgEmpleado(null);
+  c.onclick = e => { const tr = e.target.closest('tr[data-id]'); if (tr) dlgEmpleado(B.empleados.find(x => x.id === tr.dataset.id)); };
+}
+
+function dlgEmpleado(e) {
+  const B = PER.base;
+  const nuevo = !e;
+  e = e || { tipo_pago: 'QUINCENAL', activo: true, fecha_ingreso: hoyLocal(), almacen_id: S.usuario.almacen_id || '' };
+  const alms = S.catalogo.almacenes.filter(a => esActivo(a.activo)).sort(porNombre);
+  const d = abrirModal(nuevo ? 'Nuevo empleado' : e.nombre, `<form id="femp" class="form" autocomplete="off">
+    <div class="dos-col"><div class="col">
+      <div class="fila2"><label>Número<input name="numero" value="${esc(e.numero || '')}" inputmode="numeric" placeholder="Automático"></label>
+        <label>Puesto<input name="puesto" value="${esc(e.puesto || '')}"></label></div>
+      <label>Nombre completo<input name="nombre" required value="${esc(e.nombre || '')}"></label>
+      <label>Sucursal<select name="almacen_id" ${esGeneral() ? '' : 'disabled'}>${alms.map(a => `<option value="${esc(a.id)}" ${a.id === e.almacen_id ? 'selected' : ''}>${esc(a.nombre)}</option>`).join('')}</select></label>
+      <div class="fila2"><label>Teléfono<input name="telefono" type="tel" value="${esc(e.telefono || '')}"></label><label>Correo<input name="email" type="email" value="${esc(e.email || '')}"></label></div>
+      <label>Fecha de ingreso<input name="fecha_ingreso" type="date" value="${esc(e.fecha_ingreso || '')}" required></label>
+    </div><div class="col">
+      <div class="fila2"><label>Se le paga<select name="tipo_pago">${Object.entries(TIPO_PAGO_TXT).map(([k, t]) => `<option value="${k}" ${e.tipo_pago === k ? 'selected' : ''}>${t}</option>`).join('')}</select></label>
+        <label>Salario diario<input name="salario_diario" type="number" min="0" step="0.01" value="${esc(e.salario_diario || '')}" required inputmode="decimal"></label></div>
+      <p class="nota" id="femp-eq"></p>
+      <label class="chk"><input type="checkbox" name="usa_checador" ${e.usa_checador !== false ? 'checked' : ''}> Usa el checador <small>(si no, se le paga su salario fijo sin registrar entradas)</small></label>
+      <label>Horario<select name="horario_id"><option value="">Sin horario (de lunes a sábado)</option>${B.horarios.filter(h => esActivo(h.activo) || h.id === e.horario_id).map(h => `<option value="${esc(h.id)}" ${h.id === e.horario_id ? 'selected' : ''}>${esc(h.nombre)} (${esc(h.hora_entrada)}–${esc(h.hora_salida)})</option>`).join('')}</select></label>
+      <div class="fila2"><label>NIP <small>(4 a 6 números)</small><input name="pin" type="password" inputmode="numeric" maxlength="6" placeholder="${e.tiene_pin ? 'Dejar vacío para no cambiar' : 'Para checar y hacer solicitudes'}"></label>
+        <label>Área<input name="area" list="femp-areas" value="${esc(e.area || '')}" placeholder="Ej. Caja, Almacén, Piso"><datalist id="femp-areas">${(B.areas || []).map(a => `<option value="${esc(a)}">`).join('')}</datalist></label></div>
+      <label>Usuario de caja <small>(para bonos por sus ventas)</small><select name="usuario_id"><option value="">Ninguno</option>${(B.usuarios || []).map(x => `<option value="${esc(x.id)}" ${x.id === e.usuario_id ? 'selected' : ''}>${esc(x.nombre)} (${esc(x.usuario)})</option>`).join('')}</select></label>
+      <label>Notas<input name="notas" value="${esc(e.notas || '')}"></label>
+      <label class="chk"><input type="checkbox" name="activo" ${e.activo !== false ? 'checked' : ''}> Activo</label>
+    </div></div>
+    <p class="msg" id="femp-msg"></p>
+    <div class="pie"><button type="button" class="btn sec" data-cerrar>Cancelar</button><button class="btn" type="submit">Guardar</button></div></form>`, 'medio');
+  const f = $('#femp', d);
+  const eq = () => { const s = Number(f.salario_diario.value) || 0; $('#femp-eq', d).textContent = s ? `Equivale a ${dinero(s * 7)} por semana, ${dinero(s * 15)} por quincena o ${dinero(s * 30.4)} al mes.` : ''; };
+  f.salario_diario.oninput = eq; eq();
+  f.onsubmit = async ev => {
+    ev.preventDefault();
+    try {
+      await conCarga('Guardando…', () => api('guardarEmpleado', { empleado: { id: e.id || '', numero: f.numero.value.trim(), nombre: f.nombre.value, puesto: f.puesto.value,
+        almacen_id: f.almacen_id.value, telefono: f.telefono.value, email: f.email.value, fecha_ingreso: f.fecha_ingreso.value, tipo_pago: f.tipo_pago.value,
+        salario_diario: f.salario_diario.value, horario_id: f.horario_id.value, pin: f.pin.value.trim(), area: f.area.value.trim(), usuario_id: f.usuario_id.value, usa_checador: f.usa_checador.checked,
+        notas: f.notas.value, activo: f.activo.checked } }));
+      cerrarModal(); toast('Empleado guardado.', 'ok'); PER.repintar();
+    } catch (er) { $('#femp-msg', d).textContent = er.message; }
+  };
+}
+
+/* ---- Horarios y reglas ---- */
+function pePintarReglas(c) {
+  const B = PER.base, R = B.reglas, ag = esGeneral();
+  const dias = h => String(h.dias_semana).split(',').map(n => LETRA_DIA[n]).join(' ');
+  const ley = [[1, 12], [2, 14], [3, 16], [4, 18], [5, 20], ['6 a 10', 22], ['11 a 15', 24], ['16 a 20', 26], ['21 a 25', 28]];
+  c.innerHTML = `<div class="dos-col"><div class="col panel"><div class="titulo"><h3>Horarios</h3><button type="button" class="btn sec mini" id="ho-nuevo">Nuevo horario</button></div>
+      ${B.horarios.length ? `<ul class="lista">${B.horarios.map(h => `<li class="clic" data-h="${esc(h.id)}"><span><b>${esc(h.nombre)}</b> ${esActivo(h.activo) ? '' : '<small>(inactivo)</small>'}
+        <small>${esc(h.hora_entrada)} a ${esc(h.hora_salida)} · ${dias(h)} · tolerancia ${h.tolerancia} min · después de ${h.limite_retardo || '—'} min cuenta como falta</small></span></li>`).join('')}</ul>`
+        : '<p class="vacio">Registra al menos un horario antes de dar de alta empleados.</p>'}
+      <h3>Vacaciones por ley</h3><table class="tabla"><thead><tr><th>Años cumplidos</th><th class="num">Días</th></tr></thead><tbody>${ley.map(([a, dd]) => `<tr><td>${a}</td><td class="num">${dd}</td></tr>`).join('')}</tbody></table>
+    </div>
+    <form id="freg" class="col panel form"><h3>Reglas de pago</h3>
+      <div class="fila2"><label>Tope de adelanto (% del sueldo del periodo)<select name="tope_adelanto">${[20, 25, 30, 40, 50, 60, 70, 100].concat([R.tope_adelanto]).filter((v, i, a) => a.indexOf(v) === i).sort((a, b) => a - b)
+        .map(v => `<option value="${v}" ${v === R.tope_adelanto ? 'selected' : ''}>${v}%</option>`).join('')}</select></label>
+        <label>Adelantos por periodo<input name="adelantos_por_periodo" type="number" min="0" max="10" value="${R.adelantos_por_periodo}"></label></div>
+      <div class="fila2"><label>Días trabajados para pedir adelanto<input name="antiguedad_adelanto" type="number" min="0" value="${R.antiguedad_adelanto}"></label>
+        <label>Prima vacacional (%)<input name="prima_vacacional" type="number" min="0" max="100" value="${R.prima_vacacional}"></label></div>
+      <div class="fila2"><label>Descuento por cada retardo ($)<input name="descuento_retardo" type="number" min="0" step="0.01" value="${R.descuento_retardo}"></label>
+        <label>Retardos que equivalen a una falta<input name="retardos_por_falta" type="number" min="0" max="31" value="${R.retardos_por_falta}"><small>0 = no aplica</small></label></div>
+      <div class="fila2"><label>La semana de pago empieza en<select name="inicio_semana">${NOMBRE_DIA.map((t, i) => `<option value="${i}" ${i === R.inicio_semana ? 'selected' : ''}>${t}</option>`).join('')}</select></label><span></span></div>
+      <p class="nota">Los bonos de puntualidad, de ventas y de producto son opcionales: se configuran en la pestaña <b>Bonos</b>.</p>
+      <label>Zona horaria del negocio<select name="zona">${B.zonas.map(z => `<option value="${z}" ${z === R.zona ? 'selected' : ''}>${z.replace('America/', '').replace('_', ' ')}${z === 'America/Mazatlan' ? ' (Sinaloa, Nayarit, Sur de Baja California)' : z === 'America/Mexico_City' ? ' (Centro)' : ''}</option>`).join('')}</select>
+        <small>Define la hora oficial para checadas, cortes y reportes.</small></label>
+      <p class="nota">Pago diario: solo se pagan los días trabajados (más vacaciones y permisos). Pago semanal y quincenal: salario fijo de todos los días del periodo, incluido el descanso semanal; las faltas se descuentan. La incapacidad no se paga aquí. Quien no usa checador cobra su salario fijo completo.</p>
+      <p class="msg" id="freg-msg"></p>
+      ${ag ? '<div class="pie"><button class="btn" type="submit">Guardar reglas</button></div>' : '<p class="nota">Solo el administrador general cambia las reglas.</p>'}
+    </form></div>`;
+  $('#ho-nuevo', c).onclick = () => dlgHorario(null);
+  c.querySelector('.lista') && (c.querySelector('.lista').onclick = e => { const li = e.target.closest('[data-h]'); if (li) dlgHorario(B.horarios.find(h => h.id === li.dataset.h)); });
+  const f = $('#freg', c);
+  if (!ag) $$('input,select', f).forEach(x => { x.disabled = true; });
+  f.onsubmit = async ev => {
+    ev.preventDefault();
+    const reglas = {};
+    ['tope_adelanto', 'adelantos_por_periodo', 'antiguedad_adelanto', 'prima_vacacional', 'descuento_retardo', 'retardos_por_falta', 'inicio_semana'].forEach(k => { reglas[k] = Number(f[k].value) || 0; });
+    reglas.zona = f.zona.value;
+    try { await conCarga('Guardando reglas…', () => api('guardarReglasNomina', { reglas })); toast('Reglas guardadas.', 'ok'); PER.repintar(); } catch (e) { $('#freg-msg', c).textContent = e.message; }
+  };
+}
+
+function dlgHorario(h) {
+  const nuevo = !h;
+  h = h || { hora_entrada: '09:00', hora_salida: '18:00', dias_semana: '1,2,3,4,5,6', tolerancia: 10, limite_retardo: 30, activo: true };
+  const dias = String(h.dias_semana).split(',');
+  const d = abrirModal(nuevo ? 'Nuevo horario' : h.nombre, `<form id="fho" class="form">
+    <label>Nombre<input name="nombre" required value="${esc(h.nombre || '')}" placeholder="Ej. Matutino, Lunes a sábado"></label>
+    <div class="fila2"><label>Entrada<input name="hora_entrada" type="time" required value="${esc(h.hora_entrada)}"></label><label>Salida<input name="hora_salida" type="time" required value="${esc(h.hora_salida)}"></label></div>
+    <div class="campo"><span>Días de trabajo</span><div class="dias-sem">${[1, 2, 3, 4, 5, 6, 0].map(i => `<label class="chk"><input type="checkbox" name="d${i}" ${dias.includes(String(i)) ? 'checked' : ''}> ${NOMBRE_DIA[i].slice(0, 3)}</label>`).join('')}</div></div>
+    <div class="fila2"><label>Tolerancia (minutos)<input name="tolerancia" type="number" min="0" max="120" value="${h.tolerancia}"><small>Hasta aquí cuenta a tiempo.</small></label>
+      <label>Falta después de (minutos)<input name="limite_retardo" type="number" min="0" max="600" value="${h.limite_retardo}"><small>Entre la tolerancia y este límite es retardo. 0 = nunca es falta.</small></label></div>
+    <label class="chk"><input type="checkbox" name="activo" ${esActivo(h.activo) ? 'checked' : ''}> Activo</label>
+    <p class="msg" id="fho-msg"></p>
+    <div class="pie"><button type="button" class="btn sec" data-cerrar>Cancelar</button><button class="btn" type="submit">Guardar</button></div></form>`);
+  const f = $('#fho', d);
+  f.onsubmit = async ev => {
+    ev.preventDefault();
+    const ds = [0, 1, 2, 3, 4, 5, 6].filter(i => f['d' + i].checked).join(',');
+    try {
+      await conCarga('Guardando…', () => api('guardarHorario', { horario: { id: h.id || '', nombre: f.nombre.value, hora_entrada: f.hora_entrada.value, hora_salida: f.hora_salida.value,
+        dias_semana: ds, tolerancia: f.tolerancia.value, limite_retardo: f.limite_retardo.value, activo: f.activo.checked } }));
+      cerrarModal(); toast('Horario guardado.', 'ok'); PER.repintar();
+    } catch (e) { $('#fho-msg', d).textContent = e.message; }
+  };
+}
+
+/* ---------------- Checador (entradas y salidas con número y NIP) ---------------- */
+const CHK = { numero: '', pin: '', datos: null, reloj: null, inactivo: null };
+
+async function enviarChecadas() {
+  const cola = (await DB.get('checadas')) || [];
+  if (!cola.length) return;
+  const quedan = [];
+  for (const c of cola) {
+    try {
+      const r = await api('checador', { numero: c.numero, pin: c.pin, accion: 'checar', momento: c.momento, id: c.id });
+      if (!r.duplicado) toast(`Checada sin conexión enviada: ${r.nombre}, ${r.tipo === 'ENTRADA' ? 'entrada' : 'salida'} ${r.hora}.`, 'ok');
+    } catch (e) {
+      if (e.red) { quedan.push(c); continue; }
+      toast(`No se registró una checada sin conexión (número ${c.numero}): ${e.message}`, 'error');
+    }
+  }
+  await DB.set('checadas', quedan);
+}
+
+function vChecador(el) {
+  clearInterval(CHK.reloj);
+  el.innerHTML = `<div class="checador">
+    <div class="chk-reloj"><b id="chk-hora"></b><span id="chk-fecha"></span></div>
+    <form id="chk-form" class="panel chk-panel" autocomplete="off">
+      <h2>Checador</h2>
+      <p class="nota">Escribe tu número de empleado y tu NIP.</p>
+      <div class="fila2"><label>Número<input name="numero" inputmode="numeric" maxlength="6" required></label>
+        <label>NIP<input name="pin" type="password" inputmode="numeric" maxlength="6" required></label></div>
+      <div class="teclado">${[1, 2, 3, 4, 5, 6, 7, 8, 9].map(n => `<button type="button" data-k="${n}">${n}</button>`).join('')}<button type="button" data-k="borrar" aria-label="Borrar">⌫</button><button type="button" data-k="0">0</button><button type="submit" class="ok">OK</button></div>
+      <p class="msg" id="chk-msg"></p>
+      <p class="nota" id="chk-cola"></p>
+    </form>
+    <div id="chk-persona" hidden></div>
+  </div>`;
+  const f = $('#chk-form', el), msg = $('#chk-msg', el), per = $('#chk-persona', el);
+  let campo = f.numero;
+  f.numero.onfocus = () => { campo = f.numero; };
+  f.pin.onfocus = () => { campo = f.pin; };
+  f.numero.onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); f.pin.focus(); } };
+  const reloj = () => {
+    if (!el.isConnected || !$('#chk-hora', el)) { clearInterval(CHK.reloj); return; }
+    const d = new Date();
+    $('#chk-hora', el).textContent = d.toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    $('#chk-fecha', el).textContent = d.toLocaleDateString('es-MX', { weekday: 'long', day: 'numeric', month: 'long' });
+  };
+  reloj();
+  CHK.reloj = setInterval(reloj, 1000);
+  const cola = async () => { const n = ((await DB.get('checadas')) || []).length; const p = $('#chk-cola', el); if (p) p.textContent = n ? `${plural(n, 'checada')} sin conexión esperando enviarse.` : ''; };
+  cola();
+  $('.teclado', el).onclick = e => {
+    const b = e.target.closest('[data-k]');
+    if (!b) return;
+    if (b.dataset.k === 'borrar') campo.value = campo.value.slice(0, -1);
+    else if (campo.value.length < 6) campo.value += b.dataset.k;
+    if (campo === f.numero && f.numero.value.length >= 1) { /* sigue en número hasta que toque NIP */ }
+  };
+  const reiniciar = () => {
+    clearTimeout(CHK.inactivo);
+    CHK.numero = CHK.pin = ''; CHK.datos = null;
+    per.hidden = true; per.innerHTML = '';
+    f.hidden = false; f.reset(); msg.textContent = '';
+    f.numero.focus(); campo = f.numero;
+    cola();
+  };
+  const vigilar = () => { clearTimeout(CHK.inactivo); CHK.inactivo = setTimeout(() => { if (el.isConnected) reiniciar(); }, 45000); };
+  const resultado = (html, cls, despues = 4500) => {
+    per.innerHTML = `<div class="panel chk-res ${cls}">${html}</div>`;
+    per.hidden = false; f.hidden = true;
+    clearTimeout(CHK.inactivo);
+    CHK.inactivo = setTimeout(() => { if (el.isConnected) reiniciar(); }, despues);
+  };
+  f.onsubmit = async ev => {
+    ev.preventDefault();
+    const numero = f.numero.value.trim(), pin = f.pin.value.trim();
+    if (!numero || !pin) { msg.textContent = 'Escribe tu número y tu NIP.'; (numero ? f.pin : f.numero).focus(); return; }
+    CHK.numero = numero; CHK.pin = pin;
+    if (!navigator.onLine) {
+      per.innerHTML = `<div class="panel chk-persona"><h2>Sin conexión</h2><p>Tu checada se guardará en este equipo y se enviará al volver el internet. El NIP se revisa al enviarla.</p>
+        <button type="button" class="btn chk-grande" id="chk-off">Registrar entrada o salida</button><button type="button" class="btn sec" id="chk-salir">Cancelar</button></div>`;
+      per.hidden = false; f.hidden = true; vigilar();
+      $('#chk-salir', per).onclick = reiniciar;
+      $('#chk-off', per).onclick = async () => {
+        const c = (await DB.get('checadas')) || [];
+        c.push({ id: uuid(), numero, pin, momento: new Date().toISOString() });
+        await DB.set('checadas', c);
+        resultado(`<h2>Checada guardada</h2><p class="chk-hora-g">${horaDe(new Date().toISOString())}</p><p>Se enviará al volver el internet.</p>`, 'bien');
+      };
+      return;
+    }
+    try {
+      CHK.datos = await conCarga('Verificando…', () => api('checador', { numero, pin, accion: 'identificar' }));
+      pintarPersona();
+    } catch (e) { msg.textContent = e.message; f.pin.value = ''; f.pin.focus(); }
+  };
+  const pintarPersona = () => {
+    const D = CHK.datos, h = D.empleado.horario;
+    const sig = D.siguiente;
+    const q = D.quincena;
+    per.innerHTML = `<div class="panel chk-persona">
+      <h2>Hola, ${esc(D.empleado.nombre.split(' ')[0])}</h2>
+      <p>${esc(D.empleado.puesto || '')}${h ? ` · Horario ${esc(h.hora_entrada)} a ${esc(h.hora_salida)}` : ''}</p>
+      <p>Hoy: entrada <b>${horaDe(D.hoy.entrada) || '—'}</b> · salida <b>${horaDe(D.hoy.salida) || '—'}</b></p>
+      ${sig === 'NO_CHECA' ? '<p class="aviso-caja">Tienes salario fijo: no necesitas checar.</p>' : sig === 'COMPLETO' ? '<p class="aviso-caja">Ya registraste tu entrada y tu salida de hoy.</p>' : `<button type="button" class="btn chk-grande ${sig === 'SALIDA' ? 'salida' : ''}" id="chk-marcar">Registrar ${sig === 'ENTRADA' ? 'entrada' : 'salida'}</button>`}
+      <div class="chk-quin"><b>Tu quincena (${rangoTxt(q.desde, q.hasta)})</b><div>${Object.entries(q.dias).map(([d, x]) => `<span class="asis-c e-${x.estado || 'NADA'}" title="${fechaCorta(d)} ${x.estado ? ESTADO_DIA[x.estado][0] : ''}">${Number(d.slice(8))}</span>`).join('')}</div>
+        <small>${q.conteo.A_TIEMPO} a tiempo · ${q.conteo.RETARDO} retardos · ${q.conteo.FALTA} faltas</small></div>
+      ${D.bonos && (D.bonos.avance.length || D.bonos.ganados.length) ? `<div class="chk-bonos"><b>Tus bonos</b>
+        ${D.bonos.ganados.length ? `<p class="txt-ok">Ganados esta quincena: <b>${dinero(D.bonos.ganados.reduce((s2, b) => s2 + b.monto, 0))}</b></p>` : ''}
+        ${D.bonos.avance.filter(b => b.tipo !== 'PUNTUALIDAD' && b.logro !== undefined).slice(0, 4).map(b => `<div class="avance"><span>${esc(b.nombre)} <small>(al ${fechaCorta(b.fin)})</small></span>
+          <div class="barra"><i style="width:${Math.min(100, Math.round(b.logro / b.meta * 100))}%"></i></div>
+          <small>${b.medida === 'PIEZAS' ? numero(b.logro) + ' de ' + numero(b.meta) + ' pzas' : dinero(b.logro) + ' de ' + dinero(b.meta)} · bono ${dinero(b.monto)}</small></div>`).join('')}</div>` : ''}
+      <div class="acciones"><button type="button" class="btn sec" id="chk-vac">Pedir vacaciones${D.vacaciones.anios >= 1 ? ` (${D.vacaciones.disponibles - D.vacaciones.pendientes} días)` : ''}</button>
+        <button type="button" class="btn sec" id="chk-ade">Pedir adelanto${D.adelanto.disponible ? ` (hasta ${dinero(D.adelanto.disponible)})` : ''}</button>
+        <button type="button" class="btn sec" id="chk-salir">Salir</button></div>
+      <div id="chk-extra"></div>
+      ${D.solicitudes.length ? `<details><summary>Mis solicitudes</summary><ul class="lista">${D.solicitudes.map(s => `<li>${s.desde ? `Vacaciones ${fechaCorta(s.desde)} al ${fechaCorta(s.hasta)}` : `Adelanto ${dinero(s.monto)}`} · ${ESTADO_SOL[s.estado] || s.estado}</li>`).join('')}</ul></details>` : ''}
+    </div>`;
+    per.hidden = false; f.hidden = true; vigilar();
+    per.onclick = vigilar;
+    $('#chk-salir', per).onclick = reiniciar;
+    const bm = $('#chk-marcar', per);
+    if (bm) bm.onclick = async () => {
+      try {
+        const r = await conCarga('Registrando…', () => api('checador', { numero: CHK.numero, pin: CHK.pin, accion: 'checar', id: uuid() }));
+        const tarde = r.tipo === 'ENTRADA' && r.estado !== 'A_TIEMPO';
+        resultado(`<h2>${r.tipo === 'ENTRADA' ? 'Entrada' : 'Salida'} registrada</h2><p class="chk-hora-g">${r.hora}</p>
+          <p>${r.tipo === 'SALIDA' ? `¡Gracias por tu trabajo, ${esc(r.nombre.split(' ')[0])}! Que descanses.` : r.estado === 'A_TIEMPO' ? `¡Buen día, ${esc(r.nombre.split(' ')[0])}! Llegaste a tiempo.`
+            : r.estado === 'RETARDO' ? `Retardo de ${r.minutos_tarde} minutos.` : `Llegaste ${r.minutos_tarde} minutos tarde: cuenta como falta. Habla con tu encargado.`}</p>`, tarde ? 'mal' : 'bien');
+      } catch (e) { toast(e.message, 'error'); }
+    };
+    $('#chk-vac', per).onclick = () => {
+      $('#chk-extra', per).innerHTML = `<form class="form" id="chk-fv"><div class="fila2"><label>Desde<input name="desde" type="date" required min="${hoyLocal()}"></label><label>Hasta<input name="hasta" type="date" required min="${hoyLocal()}"></label></div>
+        <label>Comentario<input name="notas"></label><button class="btn">Enviar solicitud</button></form>`;
+      $('#chk-fv', per).onsubmit = async ev => {
+        ev.preventDefault();
+        const fv = ev.target;
+        try {
+          const r = await conCarga('Enviando…', () => api('checador', { numero: CHK.numero, pin: CHK.pin, accion: 'vacaciones', desde: fv.desde.value, hasta: fv.hasta.value, notas: fv.notas.value.trim() }));
+          resultado(`<h2>Solicitud enviada</h2><p>Vacaciones del ${fechaCorta(r.vacaciones.desde)} al ${fechaCorta(r.vacaciones.hasta)} (${plural(r.vacaciones.dias, 'día')}). Tu encargado la revisará.</p>`, 'bien', 6000);
+        } catch (e) { toast(e.message, 'error'); }
+      };
+    };
+    $('#chk-ade', per).onclick = () => {
+      const a = CHK.datos.adelanto;
+      $('#chk-extra', per).innerHTML = a.motivo ? `<p class="aviso-caja">${esc(a.motivo)}</p>` : `<form class="form" id="chk-fa">
+        <p class="nota">Puedes pedir hasta ${dinero(a.disponible)} (${a.tope}% de tu sueldo del periodo). Se descuenta en tu próximo pago.</p>
+        <div class="fila2"><label>Monto<input name="monto" type="number" min="1" max="${a.disponible}" step="0.01" required inputmode="decimal"></label><label>Motivo<input name="motivo"></label></div>
+        <button class="btn">Enviar solicitud</button></form>`;
+      const fa = $('#chk-fa', per);
+      if (fa) fa.onsubmit = async ev => {
+        ev.preventDefault();
+        try {
+          const r = await conCarga('Enviando…', () => api('checador', { numero: CHK.numero, pin: CHK.pin, accion: 'adelanto', monto: fa.monto.value, motivo: fa.motivo.value.trim() }));
+          resultado(`<h2>Solicitud enviada</h2><p>Adelanto de ${dinero(r.adelanto.monto)}. Tu encargado la revisará.</p>`, 'bien', 6000);
+        } catch (e) { toast(e.message, 'error'); }
+      };
+    };
+  };
+  S.refrescar = null;
+  f.numero.focus();
+}
+
+/* ---------------- Análisis de ventas, rotación y temporadas ---------------- */
+const ANA = { tab: 'top', per: '30', desde: '', hasta: '', alm: '', metrica: 'cantidad', agrupar: false, datos: null, clave: '', filtro: '', sel: new Set(), temp: null };
+const PERIODOS_ANA = {
+  '7': ['Últimos 7 días', () => [hoyLocal(-6), hoyLocal()]],
+  '30': ['Últimos 30 días', () => [hoyLocal(-29), hoyLocal()]],
+  mes: ['Este mes', () => [hoyLocal().slice(0, 8) + '01', hoyLocal()]],
+  mespas: ['Mes pasado', () => { const h = new Date(); const f = x => x.toISOString().slice(0, 10); return [f(new Date(h.getFullYear(), h.getMonth() - 1, 1, 12)), f(new Date(h.getFullYear(), h.getMonth(), 0, 12))]; }],
+  '90': ['Últimos 3 meses', () => [hoyLocal(-89), hoyLocal()]],
+  anio: ['Este año', () => [hoyLocal().slice(0, 5) + '01-01', hoyLocal()]],
+  '365': ['Últimos 12 meses', () => [hoyLocal(-364), hoyLocal()]],
+  libre: ['Elegir fechas…', () => [ANA.desde || hoyLocal(-29), ANA.hasta || hoyLocal()]]
+};
+const ALERTAS = {
+  REABASTECER: ['Tener más', 'Se vende bien y lo que hay alcanza para menos de 15 días (o está bajo el mínimo).', 'ok'],
+  PROMOCION_CADUCIDAD: ['Promocionar ya', 'Caduca en menos de 1 mes y lleva más de 2 meses en inventario: descuento, regalo con compra o degustación.', 'rojo'],
+  CADUCADO: ['Caducado', 'Ya caducó: retirarlo del anaquel.', 'rojo'],
+  SIN_MOVIMIENTO: ['Sin ventas en 2 meses', 'Propuesta para retirar: liquidarlo y no volver a comprarlo.', 'rojo'],
+  NO_LLEGA_TEMPORADA: ['No aguanta a su temporada', 'Es de temporada pero caduca antes de la siguiente (o antes de que termine): sacarlo ahora.', 'aviso'],
+  CADUCA_PRONTO: ['Caduca pronto', 'Vence en menos de 1 mes.', 'aviso'],
+  SOBREINVENTARIO: ['Demasiado inventario', 'Hay para más de 4 meses de venta: promocionar y no reabastecer.', 'aviso'],
+  DESCONTINUADO: ['Descontinuado', 'Vender lo que queda; no se vuelve a comprar.', 'gris']
+};
+const puedeMarcar = () => ['ADMIN_GENERAL', 'INVENTARIOS'].includes(rol());
+const catNombre = id => (S.idx.cat[id] || {}).nombre || 'Sin categoría';
+const tempNombre = id => ((S.temporadasLista || []).find(t => t.id === id) || {}).nombre || '';
+
+async function cargarAnalisis(forzar = false) {
+  const [desde, hasta] = PERIODOS_ANA[ANA.per][1]();
+  ANA.desde = desde; ANA.hasta = hasta;
+  const clave = [desde, hasta, ANA.alm].join('|');
+  if (!ANA.datos || ANA.clave !== clave || forzar) {
+    ANA.datos = await api('analisis', { desde, hasta, almacen_id: ANA.alm });
+    ANA.clave = clave;
+  }
+  return ANA.datos;
+}
+
+function vAnalisis(el) {
+  const tabs = [['top', 'Más vendidos'], ['rotacion', 'Rotación y sugerencias'], ['temporadas', 'Temporadas']];
+  el.innerHTML = `<div class="titulo"><h2>Análisis de ventas</h2><div class="acciones"><button type="button" class="btn sec" id="an-act">Actualizar</button></div></div>
+    <div class="segmentos" id="an-tabs">${tabs.map(([k, t]) => `<button type="button" data-t="${k}" class="${ANA.tab === k ? 'activo' : ''}">${t}</button>`).join('')}</div>
+    <div id="an-cuerpo"></div>`;
+  const c = $('#an-cuerpo', el);
+  const pintar = (forzar = false) => ({ top: anPintarTop, rotacion: anPintarRotacion, temporadas: anPintarTemporadas })[ANA.tab](c, forzar);
+  $('#an-tabs', el).onclick = e => {
+    const b = e.target.closest('[data-t]');
+    if (!b) return;
+    ANA.tab = b.dataset.t;
+    $$('#an-tabs button', el).forEach(x => x.classList.toggle('activo', x === b));
+    pintar();
+  };
+  $('#an-act', el).onclick = () => pintar(true);
+  ANA.repintar = pintar;
+  S.refrescar = null;
+  pintar();
+}
+
+function filtrosAnalisis(c, alCambiar, conMetrica = true) {
+  const f = document.createElement('div');
+  f.className = 'filtros';
+  f.innerHTML = `<select id="an-per">${Object.entries(PERIODOS_ANA).map(([k, [t]]) => `<option value="${k}" ${ANA.per === k ? 'selected' : ''}>${t}</option>`).join('')}</select>
+    <span id="an-libre" ${ANA.per === 'libre' ? '' : 'hidden'}><input type="date" id="an-desde" value="${ANA.desde}"> a <input type="date" id="an-hasta" value="${ANA.hasta}"></span>
+    ${filtrosSucursal('an-alm', ANA.alm)}
+    ${conMetrica ? `<div class="seg" id="an-met"><button type="button" data-m="cantidad" class="${ANA.metrica === 'cantidad' ? 'activo' : ''}">Piezas</button><button type="button" data-m="importe" class="${ANA.metrica === 'importe' ? 'activo' : ''}">Importe</button></div>` : ''}`;
+  c.prepend(f);
+  $('#an-per', f).onchange = e => { ANA.per = e.target.value; $('#an-libre', f).hidden = ANA.per !== 'libre'; if (ANA.per !== 'libre') alCambiar(); };
+  $$('#an-desde, #an-hasta', f).forEach(x => { x.onchange = () => { ANA.desde = $('#an-desde', f).value; ANA.hasta = $('#an-hasta', f).value; if (ANA.desde && ANA.hasta) alCambiar(); }; });
+  const a = $('#an-alm', f);
+  if (a) a.onchange = () => { ANA.alm = a.value; alCambiar(); };
+  const m = $('#an-met', f);
+  if (m) m.onclick = e => { const b = e.target.closest('[data-m]'); if (b) { ANA.metrica = b.dataset.m; alCambiar(); } };
+}
+
+/* ---- Top 50 y top 10 por categoría ---- */
+async function anPintarTop(c, forzar) {
+  c.innerHTML = '<div id="an-res"></div>';
+  filtrosAnalisis(c, () => anPintarTop(c));
+  const res = $('#an-res', c);
+  const d = await pedir(res, 'Analizando ventas…', () => cargarAnalisis(forzar));
+  if (!d) return;
+  const m = ANA.metrica;
+  const vendidos = d.productos.filter(p => p.cantidad > 0).sort((a, b) => b[m] - a[m] || b.cantidad - a.cantidad);
+  const total = vendidos.reduce((s, p) => s + p.importe, 0), piezas = vendidos.reduce((s, p) => s + p.cantidad, 0);
+  const prod = id => S.idx.prod[id] || {};
+  const top = vendidos.slice(0, 50);
+  const lista = ANA.agrupar ? top.slice().sort((a, b) => catNombre(prod(a.id).categoria_id).localeCompare(catNombre(prod(b.id).categoria_id)) || b[m] - a[m]) : top;
+  const rank = new Map(top.map((p, i) => [p.id, i + 1]));
+  let catAnt = null;
+  const filas = lista.map(p => {
+    const pr = prod(p.id), cat = catNombre(pr.categoria_id);
+    const grupo = ANA.agrupar && cat !== catAnt ? `<tr class="asis-grupo"><td colspan="8">${esc(cat)}</td></tr>` : '';
+    catAnt = cat;
+    return `${grupo}<tr class="clic" data-p="${esc(p.id)}"><td class="num rank">${rank.get(p.id)}</td><td>${esc(pr.nombre || '—')}${pr.temporada_id ? ` <small class="txt-aviso">★ ${esc(tempNombre(pr.temporada_id))}</small>` : ''}</td>
+      <td>${esc(cat)}</td><td class="num"><b>${numero(p.cantidad)}</b> ${esc(pr.unidad || '')}</td><td class="num">${dinero(p.importe)}</td>
+      <td class="num">${total ? (p.importe / total * 100).toFixed(1) + '%' : '—'}</td><td class="num">${numero(p.stock)}</td>
+      <td class="num">${p.cobertura === null ? '—' : p.cobertura + ' días'}</td></tr>`;
+  }).join('');
+  // Top 10 de cada categoría
+  const porCat = {};
+  vendidos.forEach(p => { const k = prod(p.id).categoria_id || ''; (porCat[k] = porCat[k] || []).push(p); });
+  const cats = Object.entries(porCat).map(([k, l]) => ({ k, l, tot: l.reduce((s, p) => s + p[m], 0) })).sort((a, b) => b.tot - a.tot);
+  res.innerHTML = vendidos.length ? `
+    <div class="tarjetas"><div class="tarjeta"><span>Venta del periodo</span><b>${dinero(total)}</b><small>${fechaCorta(d.desde)} al ${fechaCorta(d.hasta)}</small></div>
+      <div class="tarjeta"><span>Piezas vendidas</span><b>${numero(Math.round(piezas))}</b></div><div class="tarjeta"><span>Productos distintos vendidos</span><b>${numero(vendidos.length)}</b></div>
+      <div class="tarjeta"><span>Los 10 primeros representan</span><b>${total ? (vendidos.slice(0, 10).reduce((s, p) => s + p.importe, 0) / total * 100).toFixed(0) + '%' : '—'}</b><small>de la venta</small></div></div>
+    <div class="titulo"><h3>Top 50 por ${m === 'cantidad' ? 'piezas' : 'importe'}</h3><label class="chk"><input type="checkbox" id="an-agr" ${ANA.agrupar ? 'checked' : ''}> Ordenar por categoría</label></div>
+    <div class="tabla-cont"><table class="tabla"><thead><tr><th class="num">#</th><th>Producto</th><th>Categoría</th><th class="num">Piezas</th><th class="num">Importe</th><th class="num">% de la venta</th><th class="num">Existencia</th><th class="num">Alcanza para</th></tr></thead>
+      <tbody>${filas}</tbody></table></div>
+    <h3>Top 10 de cada categoría</h3>
+    <div class="top-cats">${cats.map(({ k, l, tot }) => `<div class="panel top-cat"><div class="titulo"><h4>${esc(catNombre(k))}</h4><small>${m === 'cantidad' ? numero(tot) + ' pzas' : dinero(tot)}</small></div>
+      <ol>${l.slice(0, 10).map(p => `<li data-p="${esc(p.id)}" class="clic"><span>${esc(prod(p.id).nombre || '—')}</span><b>${m === 'cantidad' ? numero(p.cantidad) : dinero(p.importe)}</b></li>`).join('')}</ol></div>`).join('')}</div>`
+    : '<p class="vacio">No hay ventas en este periodo.</p>';
+  const ag = $('#an-agr', res);
+  if (ag) ag.onchange = () => { ANA.agrupar = ag.checked; anPintarTop(c); };
+  res.onclick = e => { const x = e.target.closest('[data-p]'); if (x) dlgDondeHay(S.idx.prod[x.dataset.p]); };
+}
+
+/* ---- Rotación: qué tener más, qué promocionar y qué retirar ---- */
+async function anPintarRotacion(c, forzar) {
+  c.innerHTML = '<div id="an-res"></div>';
+  const res = $('#an-res', c);
+  const d = await pedir(res, 'Analizando inventario…', () => cargarAnalisis(forzar));
+  if (!d) return;
+  const prod = id => S.idx.prod[id] || {};
+  const conAlerta = d.productos.filter(p => p.alertas.length);
+  const cuenta = k => d.productos.filter(p => p.alertas.includes(k)).length;
+  const lista = (ANA.filtro ? d.productos.filter(p => p.alertas.includes(ANA.filtro)) : conAlerta)
+    .sort((a, b) => Object.keys(ALERTAS).indexOf(a.alertas[0]) - Object.keys(ALERTAS).indexOf(b.alertas[0]) || (prod(a.id).nombre || '').localeCompare(prod(b.id).nombre || ''));
+  const marca = puedeMarcar();
+  const abcTxt = { A: 'A · vende mucho', B: 'B · vende regular', C: 'C · vende poco', SIN_VENTA: 'Sin venta' };
+  res.innerHTML = `
+    <div class="tarjetas">${Object.entries(ALERTAS).map(([k, [t]]) => `<button type="button" class="tarjeta clic ${ANA.filtro === k ? 'sel' : ''} ${ALERTAS[k][2] === 'rojo' && cuenta(k) ? 'alerta-roja' : ALERTAS[k][2] === 'aviso' && cuenta(k) ? 'alerta' : ''}" data-f="${k}"><span>${t}</span><b>${cuenta(k)}</b></button>`).join('')}</div>
+    ${ANA.filtro ? `<p>${esc(ALERTAS[ANA.filtro][1])} <button type="button" class="btn mini sec" data-f="">Ver todas</button></p>` : '<p class="nota">Toca una tarjeta para ver solo ese grupo.</p>'}
+    ${marca ? '<div class="barra-sel" id="an-bar" hidden></div>' : ''}
+    ${lista.length ? `<div class="tabla-cont"><table class="tabla"><thead><tr>${marca ? '<th class="col-sel"></th>' : ''}<th>Producto</th><th class="num">Existencia</th><th class="num">Vendido 60 días</th><th>Última venta</th>
+      <th class="num">En inventario</th><th>Caduca</th><th class="num">Alcanza para</th><th>Clase</th><th>Sugerencia</th></tr></thead>
+      <tbody>${lista.map(p => {
+        const pr = prod(p.id);
+        return `<tr><td class="col-sel" ${marca ? '' : 'hidden'}><input type="checkbox" data-sel="${esc(p.id)}" ${ANA.sel.has(p.id) ? 'checked' : ''}></td>
+          <td><button type="button" class="link" data-p="${esc(p.id)}">${esc(pr.nombre || '—')}</button><small>${esc(catNombre(pr.categoria_id))}${p.temporada_id ? ' · ★ ' + esc(tempNombre(p.temporada_id)) : ''}</small></td>
+          <td class="num">${numero(p.stock)}</td><td class="num">${numero(p.cantidad_60)}</td><td>${p.ultima_venta ? fechaCorta(p.ultima_venta) : 'Nunca'}</td>
+          <td class="num">${p.dias_en_inventario === null ? '—' : p.dias_en_inventario + ' días'}</td>
+          <td class="${p.dias_caducidad !== null && p.dias_caducidad <= 30 ? 'txt-error' : ''}">${p.caducidad ? fechaCorta(p.caducidad) + (p.dias_caducidad < 0 ? ' (caducado)' : ` (${p.dias_caducidad} días)`) : '—'}</td>
+          <td class="num">${p.cobertura === null ? '—' : p.cobertura + ' días'}</td><td>${abcTxt[p.abc] || '—'}</td>
+          <td>${p.alertas.map(a => `<span class="chip-al al-${ALERTAS[a][2]}" title="${esc(ALERTAS[a][1])}">${ALERTAS[a][0]}</span>`).join(' ')}</td></tr>`;
+      }).join('')}</tbody></table></div>` : `<p class="vacio">${ANA.filtro ? 'Ningún producto en este grupo.' : '¡Todo en orden! No hay productos con sugerencias.'}</p>`}
+    <details class="ayuda"><summary>¿Cómo se calcula?</summary><ul>
+      <li><b>Clase A, B y C:</b> por lo que dejó cada producto en los últimos 60 días. Los A suman el 80% de la venta; los B el siguiente 15%; los C el resto.</li>
+      <li><b>En inventario:</b> antigüedad de la pieza más vieja que queda, contando que se vende primero lo que entró primero.</li>
+      <li><b>Caduca:</b> la caducidad más próxima registrada en las entradas (o la que se puso en la ficha del producto).</li>
+      <li><b>Productos de temporada:</b> no se marcan como "sin ventas" fuera de su temporada, pero sí avisan si caducan antes de la siguiente.</li>
+      <li><b>Descontinuados:</b> no se sugieren en las órdenes de compra ni en las temporadas.</li></ul></details>`;
+  const pintarBarra = () => {
+    const bar = $('#an-bar', res);
+    if (!bar) return;
+    const n = ANA.sel.size;
+    bar.hidden = !n;
+    bar.innerHTML = n ? `<b>${plural(n, 'producto')}</b><button type="button" class="btn mini" data-acc="desc">Descontinuar</button><button type="button" class="btn mini sec" data-acc="react">Quitar descontinuado</button>
+      <select id="an-temp"><option value="">Marcar de temporada…</option>${(S.temporadasLista || []).map(t => `<option value="${esc(t.id)}">${esc(t.nombre)}</option>`).join('')}<option value="-">Quitar de temporada</option></select>
+      <button type="button" class="btn mini sec" data-acc="limpiar">Quitar selección</button>` : '';
+  };
+  pintarBarra();
+  res.onclick = async e => {
+    const f = e.target.closest('[data-f]');
+    if (f) { ANA.filtro = f.dataset.f; anPintarRotacion(c); return; }
+    const p = e.target.closest('[data-p]');
+    if (p) { dlgProducto(S.idx.prod[p.dataset.p]); return; }
+    const s = e.target.closest('[data-sel]');
+    if (s) { ANA.sel[s.checked ? 'add' : 'delete'](s.dataset.sel); pintarBarra(); return; }
+    const a = e.target.closest('[data-acc]');
+    if (!a) return;
+    if (a.dataset.acc === 'limpiar') { ANA.sel.clear(); anPintarRotacion(c); return; }
+    await marcarSeleccion({ descontinuado: a.dataset.acc === 'desc' }, c);
+  };
+  res.onchange = async e => {
+    if (e.target.id !== 'an-temp' || !e.target.value) return;
+    await marcarSeleccion({ temporada_id: e.target.value === '-' ? '' : e.target.value }, c);
+  };
+}
+
+async function marcarSeleccion(cambio, c) {
+  try {
+    const r = await conCarga('Guardando…', () => api('marcarProductos', Object.assign({ ids: [...ANA.sel] }, cambio)));
+    toast(`${plural(r.actualizados, 'producto')} ${r.actualizados === 1 ? 'actualizado' : 'actualizados'}.`, 'ok');
+    ANA.sel.clear();
+    await sincronizar();
+    await cargarAnalisis(true);
+    anPintarRotacion(c);
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+/* ---- Temporadas ---- */
+const TEMPORADAS_COMUNES = [
+  ['Día de Reyes', 'FIJA', 1, 6, 1, 1], ['14 de febrero', 'FIJA', 2, 14, 1, 1], ['Semana Santa', 'SEMANA_SANTA', 0, 0, 8, 2],
+  ['Día del Niño', 'FIJA', 4, 30, 1, 1], ['Día de las Madres', 'FIJA', 5, 10, 1, 1], ['Regreso a clases', 'FIJA', 8, 10, 25, 2],
+  ['Fiestas patrias', 'FIJA', 9, 15, 2, 1], ['Día de Muertos', 'FIJA', 11, 1, 2, 1], ['Navidad', 'FIJA', 12, 1, 25, 2], ['Fin de año', 'FIJA', 12, 26, 6, 1]
+];
+const TIPO_TEMP = { FIJA: 'La misma fecha cada año', SEMANA_SANTA: 'Semana Santa (se calcula sola)', MANUAL: 'Cambia cada año (fechas a mano)' };
+
+async function anPintarTemporadas(c, forzar) {
+  if (ANA.temp) return anPintarTemporada(c, ANA.temp);
+  c.innerHTML = '<div id="an-res"></div>';
+  const res = $('#an-res', c);
+  const l = await pedir(res, 'Cargando temporadas…', () => api('temporadas'));
+  if (!l) return;
+  S.temporadasLista = l.map(t => ({ id: t.id, nombre: t.nombre, activo: t.activo }));
+  const marca = puedeMarcar();
+  res.innerHTML = `${marca ? `<div class="acciones"><button type="button" class="btn" id="tp-nueva">Nueva temporada</button><button type="button" class="btn sec" id="tp-comunes">Agregar temporadas comunes</button></div>` : ''}
+    ${l.length ? `<div class="temporadas">${l.map(t => `<button type="button" class="panel temporada ${t.en_temporada ? 'en' : t.en_aviso ? 'aviso' : ''} ${t.activo ? '' : 'inactivo'}" data-t="${esc(t.id)}">
+      <div class="titulo"><h3>${esc(t.nombre)}</h3>${t.en_temporada ? '<span class="est est-RECIBIDA">En temporada</span>' : t.en_aviso ? '<span class="est est-ATRASADA">¡Prepárate!</span>' : ''}</div>
+      ${t.proxima ? `<p><b>${fechaCorta(t.proxima.inicio)}</b>${t.proxima.fin !== t.proxima.inicio ? ' al ' + fechaCorta(t.proxima.fin) : ''}${t.dias_faltan ? ` · faltan <b>${t.dias_faltan}</b> días` : ''}</p>` : '<p class="nota">Sin fecha próxima: captura las fechas de este año.</p>'}
+      <small>${TIPO_TEMP[t.tipo_fecha]} · aviso ${t.aviso_meses} ${t.aviso_meses === 1 ? 'mes' : 'meses'} antes${t.anterior ? ` · anterior: ${fechaCorta(t.anterior.inicio)}` : ''}</small>
+      <small>${plural(t.productos_marcados, 'producto')} de temporada · ${t.propuestas.filter(p => !p.hecho).length} propuesta(s) pendiente(s)</small></button>`).join('')}</div>`
+      : '<p class="vacio">Aún no hay temporadas. Agrega las comunes (Navidad, 14 de febrero, Semana Santa…) o crea las tuyas.</p>'}`;
+  res.onclick = e => { const b = e.target.closest('[data-t]'); if (b) { ANA.temp = b.dataset.t; anPintarTemporada(c, ANA.temp); } };
+  const bn = $('#tp-nueva', res);
+  if (bn) bn.onclick = () => dlgTemporada(null, () => anPintarTemporadas(c));
+  const bc = $('#tp-comunes', res);
+  if (bc) bc.onclick = () => dlgTemporadasComunes(l, () => anPintarTemporadas(c));
+}
+
+function dlgTemporadasComunes(existentes, alTerminar) {
+  const ya = new Set(existentes.map(t => normal(t.nombre)));
+  const d = abrirModal('Temporadas comunes', `<form id="ftc" class="form"><p class="nota">Elige las que aplican a tu negocio. Después puedes cambiar fechas y avisos.</p>
+    ${TEMPORADAS_COMUNES.map(([n, tipo, m, dd, dur, av], i) => `<label class="chk"><input type="checkbox" name="t${i}" ${ya.has(normal(n)) ? 'disabled' : 'checked'}> ${esc(n)}
+      <small>${tipo === 'SEMANA_SANTA' ? 'se calcula cada año' : `${dd}/${String(m).padStart(2, '0')}${dur > 1 ? `, ${dur} días` : ''}`} · aviso ${av} mes(es) antes${ya.has(normal(n)) ? ' · ya existe' : ''}</small></label>`).join('')}
+    <p class="nota">El Día del Padre y el Buen Fin cambian de fecha cada año: créalos con "Nueva temporada" y la opción de fechas a mano.</p>
+    <div class="pie"><button type="button" class="btn sec" data-cerrar>Cancelar</button><button class="btn" type="submit">Agregar</button></div></form>`);
+  $('#ftc', d).onsubmit = async ev => {
+    ev.preventDefault();
+    const elegidas = TEMPORADAS_COMUNES.filter((_, i) => ev.target['t' + i].checked && !ev.target['t' + i].disabled);
+    try {
+      await conCarga('Agregando temporadas…', async () => {
+        for (const [nombre, tipo_fecha, mes_inicio, dia_inicio, duracion, aviso_meses] of elegidas) {
+          await api('guardarTemporada', { temporada: { nombre, tipo_fecha, mes_inicio, dia_inicio, duracion, aviso_meses, dias_previos: 15, crecimiento: 10 } });
+        }
+      });
+      cerrarModal(); toast(`${plural(elegidas.length, 'temporada')} ${elegidas.length === 1 ? 'agregada' : 'agregadas'}.`, 'ok');
+      sincronizar(); alTerminar();
+    } catch (e) { toast(e.message, 'error'); }
+  };
+}
+
+function dlgTemporada(t, alGuardar) {
+  const nuevo = !t;
+  t = t || { tipo_fecha: 'FIJA', mes_inicio: 12, dia_inicio: 1, duracion: 1, aviso_meses: 1, dias_previos: 15, crecimiento: 10, activo: true };
+  const d = abrirModal(nuevo ? 'Nueva temporada' : t.nombre, `<form id="ftp" class="form">
+    <label>Nombre<input name="nombre" required value="${esc(t.nombre || '')}" placeholder="Ej. Navidad, Día de las Madres"></label>
+    <label>Fechas<select name="tipo_fecha">${Object.entries(TIPO_TEMP).map(([k, x]) => `<option value="${k}" ${t.tipo_fecha === k ? 'selected' : ''}>${x}</option>`).join('')}</select></label>
+    <div class="fila3" data-tipo="FIJA"><label>Día de inicio<input name="dia_inicio" type="number" min="1" max="31" value="${t.dia_inicio || 1}"></label>
+      <label>Mes<select name="mes_inicio">${MESES.map((m, i) => `<option value="${i + 1}" ${Number(t.mes_inicio) === i + 1 ? 'selected' : ''}>${m}</option>`).join('')}</select></label>
+      <label>Dura (días)<input name="duracion" type="number" min="1" max="120" value="${t.duracion || 1}"></label></div>
+    <div class="fila2" data-tipo="MANUAL"><label>Inicio<input name="inicio" type="date" value="${esc(t.inicio || '')}"></label><label>Fin<input name="fin" type="date" value="${esc(t.fin || '')}"></label></div>
+    <p class="nota" data-tipo="SEMANA_SANTA">Del Domingo de Ramos al Domingo de Pascua; se calcula sola cada año.</p>
+    <div class="fila3"><label>Avisar<select name="aviso_meses">${[1, 2, 3].map(n => `<option value="${n}" ${Number(t.aviso_meses) === n ? 'selected' : ''}>${n} ${n === 1 ? 'mes' : 'meses'} antes</option>`).join('')}</select></label>
+      <label>Ventas que cuentan antes (días)<input name="dias_previos" type="number" min="0" max="60" value="${t.dias_previos}"><small>La gente compra antes de la fecha.</small></label>
+      <label>Crecimiento esperado (%)<input name="crecimiento" type="number" min="-100" max="500" value="${t.crecimiento}"><small>Para calcular cuánto tener.</small></label></div>
+    <label>Notas<input name="notas" value="${esc(t.notas || '')}"></label>
+    <label class="chk"><input type="checkbox" name="activo" ${t.activo !== false ? 'checked' : ''}> Activa</label>
+    <p class="msg" id="ftp-msg"></p>
+    <div class="pie">${nuevo ? '' : '<button type="button" class="btn peligro izq" id="ftp-del">Eliminar</button>'}<button type="button" class="btn sec" data-cerrar>Cancelar</button><button class="btn" type="submit">Guardar</button></div></form>`);
+  const f = $('#ftp', d);
+  const ver = () => $$('[data-tipo]', d).forEach(x => { x.hidden = x.dataset.tipo !== f.tipo_fecha.value; });
+  f.tipo_fecha.onchange = ver; ver();
+  f.onsubmit = async ev => {
+    ev.preventDefault();
+    try {
+      const r = await conCarga('Guardando…', () => api('guardarTemporada', { temporada: Object.assign({}, t, {
+        nombre: f.nombre.value, tipo_fecha: f.tipo_fecha.value, dia_inicio: f.dia_inicio.value, mes_inicio: f.mes_inicio.value, duracion: f.duracion.value,
+        inicio: f.inicio.value, fin: f.fin.value, aviso_meses: f.aviso_meses.value, dias_previos: f.dias_previos.value, crecimiento: f.crecimiento.value,
+        notas: f.notas.value, activo: f.activo.checked, propuestas: t.propuestas }) }));
+      cerrarModal(); toast('Temporada guardada.', 'ok'); sincronizar(); alGuardar(r);
+    } catch (e) { $('#ftp-msg', d).textContent = e.message; }
+  };
+  const bd = $('#ftp-del', d);
+  if (bd) bd.onclick = async () => {
+    if (!confirm(`¿Eliminar la temporada ${t.nombre}? Sus productos dejan de estar marcados como de temporada.`)) return;
+    try { await conCarga('Eliminando…', () => api('eliminarTemporada', { id: t.id })); cerrarModal(); ANA.temp = null; sincronizar(); alGuardar(null); } catch (e) { toast(e.message, 'error'); }
+  };
+}
+
+// Detalle: lo vendido la vez anterior, existencia, cuánto tener, ideas y propuestas
+async function anPintarTemporada(c, id) {
+  c.innerHTML = '<div id="an-res"></div>';
+  const res = $('#an-res', c);
+  const r = await pedir(res, 'Analizando la temporada…', () => api('temporada', { id, almacen_id: ANA.alm }));
+  if (!r) { ANA.temp = null; return; }
+  const T = r.temporada, prod = x => S.idx.prod[x] || {};
+  const marca = puedeMarcar();
+  const totAnt = r.filas.reduce((s, f) => s + f.importe_anterior, 0);
+  const sugeridos = r.filas.filter(f => f.sugerido > 0);
+  const rango = o => (o ? `${fechaCorta(o.inicio)}${o.fin !== o.inicio ? ' al ' + fechaCorta(o.fin) : ''}` : '—');
+  res.innerHTML = `<div class="acciones"><button type="button" class="btn sec" id="tp-volver">← Todas las temporadas</button>${marca ? '<button type="button" class="btn sec" id="tp-editar">Editar temporada</button>' : ''}</div>
+    <div class="titulo"><h3>${esc(T.nombre)}</h3>${T.en_temporada ? '<span class="est est-RECIBIDA">En temporada</span>' : T.en_aviso ? '<span class="est est-ATRASADA">¡Prepárate!</span>' : ''}</div>
+    <div class="tarjetas"><div class="tarjeta"><span>Próxima</span><b>${rango(T.proxima)}</b>${T.dias_faltan ? `<small>faltan ${T.dias_faltan} días · aviso desde ${fechaCorta(T.aviso_desde)}</small>` : ''}</div>
+      <div class="tarjeta"><span>Temporada anterior</span><b>${rango(T.anterior)}</b><small>${T.dias_previos ? `contando ${T.dias_previos} días antes · ` : ''}vendió ${dinero(totAnt)}</small></div>
+      <div class="tarjeta"><span>Para tener (+${T.crecimiento}%)</span><b>${plural(sugeridos.length, 'producto')}</b><small>${numero(sugeridos.reduce((s, f) => s + f.sugerido, 0))} piezas por comprar</small></div></div>
+    <div class="titulo"><h3>Productos</h3>${marca ? `<div class="acciones"><button type="button" class="btn mini sec" id="tp-marcar">Marcar producto de temporada</button>${sugeridos.length ? '<button type="button" class="btn mini" id="tp-oc">Orden de compra con lo sugerido</button>' : ''}</div>` : ''}</div>
+    ${r.filas.length ? `<div class="tabla-cont"><table class="tabla"><thead><tr><th>Producto</th><th class="num">Vendido la vez anterior</th><th class="num">Hace dos temporadas</th><th class="num">Existencia</th><th class="num">Meta</th><th class="num">Sugerido comprar</th><th>Caducidad</th></tr></thead>
+      <tbody>${r.filas.map(f => `<tr><td>${f.de_temporada ? '<span class="txt-aviso" title="Producto de temporada">★</span> ' : ''}${esc(prod(f.producto_id).nombre || '—')}${f.descontinuado ? ' <small>(descontinuado)</small>' : ''}
+          ${marca ? `<button type="button" class="btn mini sec" data-marcar="${esc(f.producto_id)}" data-v="${f.de_temporada ? '' : esc(T.id)}">${f.de_temporada ? 'Quitar ★' : 'Marcar ★'}</button>` : ''}</td>
+        <td class="num"><b>${numero(f.anterior)}</b></td><td class="num">${f.anterior2 ? numero(f.anterior2) : '—'}</td><td class="num">${numero(f.stock)}</td><td class="num">${numero(f.meta)}</td>
+        <td class="num">${f.sugerido ? `<b class="txt-ok">${numero(f.sugerido)}</b>` : '—'}</td>
+        <td class="${f.no_llega ? 'txt-error' : ''}">${f.caducidad ? fechaCorta(f.caducidad) + (f.no_llega ? ' · no llega' : '') : '—'}</td></tr>`).join('')}</tbody></table></div>`
+      : '<p class="vacio">Aún no hay ventas registradas en la temporada anterior ni productos marcados. El próximo año ya tendrás la comparación.</p>'}
+    <div class="dos-col"><div class="col panel"><h3>Ideas a partir de las ventas</h3>${r.ideas.length ? `<ul class="lista">${r.ideas.map(i => `<li><span><span class="chip-al al-${i.tipo === 'PRODUCTO' ? 'ok' : i.tipo === 'PROMOCION' ? 'aviso' : 'gris'}">${{ PRODUCTO: 'Producto', DINAMICA: 'Dinámica', PROMOCION: 'Promoción' }[i.tipo]}</span> ${esc(i.texto)}</span>
+        ${marca ? `<button type="button" class="btn mini sec" data-idea="${esc(i.texto)}" data-tipo="${i.tipo}">Agregar a propuestas</button>` : ''}</li>`).join('')}</ul>` : '<p class="nota">Sin ideas por ahora.</p>'}</div>
+      <div class="col panel"><h3>Propuestas para esta temporada</h3><ul class="lista" id="tp-props">${T.propuestas.length ? T.propuestas.map((p, i) => `<li><label class="chk"><input type="checkbox" data-hecho="${i}" ${p.hecho ? 'checked' : ''} ${marca ? '' : 'disabled'}>
+          <span class="${p.hecho ? 'tachado' : ''}"><span class="chip-al al-gris">${{ PRODUCTO: 'Producto nuevo', DINAMICA: 'Dinámica', PROMOCION: 'Promoción' }[p.tipo]}</span> ${esc(p.texto)}</span></label>
+          ${marca ? `<button type="button" class="btn mini sec" data-borrar="${i}">Quitar</button>` : ''}</li>`).join('') : '<li class="nota">Agrega productos nuevos que quieras probar o dinámicas (degustación, rifas, combos, decoración).</li>'}</ul>
+        ${marca ? `<form id="tp-fprop" class="fila-form"><select name="tipo"><option value="PRODUCTO">Producto nuevo</option><option value="DINAMICA">Dinámica</option><option value="PROMOCION">Promoción</option></select>
+          <input name="texto" placeholder="Ej. Traer rompope artesanal, degustación de ponche" required><button class="btn">Agregar</button></form>` : ''}</div></div>`;
+  $('#tp-volver', res).onclick = () => { ANA.temp = null; anPintarTemporadas(c); };
+  const guardarProps = async props => {
+    try { await conCarga('Guardando…', () => api('guardarTemporada', { temporada: Object.assign({}, T, { propuestas: props }) })); anPintarTemporada(c, id); } catch (e) { toast(e.message, 'error'); }
+  };
+  if (!marca) return;
+  $('#tp-editar', res).onclick = () => dlgTemporada(T, x => (x ? anPintarTemporada(c, id) : anPintarTemporadas(c)));
+  $('#tp-fprop', res).onsubmit = ev => { ev.preventDefault(); guardarProps(T.propuestas.concat([{ texto: ev.target.texto.value.trim(), tipo: ev.target.tipo.value, hecho: false }])); };
+  res.onclick = async e => {
+    const h = e.target.closest('[data-hecho]'), b = e.target.closest('[data-borrar]'), i = e.target.closest('[data-idea]'), m = e.target.closest('[data-marcar]');
+    if (h) return guardarProps(T.propuestas.map((p, k) => (k === Number(h.dataset.hecho) ? Object.assign({}, p, { hecho: h.checked }) : p)));
+    if (b) return guardarProps(T.propuestas.filter((_, k) => k !== Number(b.dataset.borrar)));
+    if (i) return guardarProps(T.propuestas.concat([{ texto: i.dataset.idea, tipo: i.dataset.tipo, hecho: false }]));
+    if (m) {
+      try { await conCarga('Guardando…', () => api('marcarProductos', { ids: [m.dataset.marcar], temporada_id: m.dataset.v })); sincronizar(); anPintarTemporada(c, id); } catch (er) { toast(er.message, 'error'); }
+    }
+  };
+  $('#tp-marcar', res).onclick = () => {
+    const d = abrirModal(`Producto de ${T.nombre}`, `<div class="form"><p class="nota">Los productos de temporada se destacan en su temporada y no se marcan como "sin ventas" el resto del año.</p><div id="tp-sel"></div></div>`);
+    selectorProducto($('#tp-sel', d), async p => {
+      if (!p) return;
+      try { await conCarga('Guardando…', () => api('marcarProductos', { ids: [p.id], temporada_id: T.id })); cerrarModal(); toast(`${p.nombre} marcado de ${T.nombre}.`, 'ok'); sincronizar(); anPintarTemporada(c, id); } catch (er) { toast(er.message, 'error'); }
+    });
+    $('.sel-q', d).focus();
+  };
+  const boc = $('#tp-oc', res);
+  if (boc) boc.onclick = async () => {
+    try { await conCarga('Cargando compras…', () => cargarCompras()); } catch (e) { toast(e.message, 'error'); return; }
+    dlgEditorOrden(null, 'orden', { notas: 'Compra para ' + T.nombre, lineas: sugeridos.map(f => ({ producto_id: f.producto_id, cantidad: f.sugerido, costo: Number(prod(f.producto_id).costo) || 0 })) });
+  };
+}
+
+/* ---------------- Lector de códigos con la cámara ---------------- */
+// Usa el lector del navegador (Chrome en Android). Si no existe (iPhone), carga ZXing desde internet.
+let LECTOR = null;
+function cargarScript(src) {
+  return new Promise((ok, mal) => {
+    const s = document.createElement('script');
+    s.src = src; s.onload = ok; s.onerror = () => mal(new Error('No se pudo cargar el lector de códigos (se necesita internet la primera vez).'));
+    document.head.appendChild(s);
+  });
+}
+async function lectorCodigos() {
+  if (LECTOR) return LECTOR;
+  if ('BarcodeDetector' in window) {
+    try {
+      const sop = await window.BarcodeDetector.getSupportedFormats();
+      const fm = ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128', 'code_39', 'code_93', 'itf', 'codabar', 'qr_code'].filter(f => sop.includes(f));
+      if (fm.length) {
+        const det = new window.BarcodeDetector({ formats: fm });
+        LECTOR = async video => { const r = await det.detect(video); return r.length ? r[0].rawValue : ''; };
+        return LECTOR;
+      }
+    } catch (e) { /* sigue con el respaldo */ }
+  }
+  if (!window.ZXing) await cargarScript('https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js');
+  const Z = window.ZXing;
+  const reader = new Z.MultiFormatReader();
+  const hints = new Map();
+  hints.set(Z.DecodeHintType.TRY_HARDER, true);
+  reader.setHints(hints);
+  const cv = document.createElement('canvas');
+  const ctx = cv.getContext('2d', { willReadFrequently: true });
+  LECTOR = async video => {
+    const w = video.videoWidth, h = video.videoHeight;
+    if (!w) return '';
+    const k = Math.min(1, 900 / w);
+    cv.width = Math.round(w * k); cv.height = Math.round(h * k);
+    ctx.drawImage(video, 0, 0, cv.width, cv.height);
+    try { return reader.decode(new Z.BinaryBitmap(new Z.HybridBinarizer(new Z.HTMLCanvasElementLuminanceSource(cv)))).getText(); } catch (e) { return ''; } finally { reader.reset(); }
+  };
+  return LECTOR;
+}
+
+// Abre la cámara dentro de un contenedor. alLeer(codigo) recibe cada código (sin repetir el mismo en 2.5 s).
+async function abrirCamara(cont, { frontal = false, continuo = false, alLeer, alError }) {
+  cont.innerHTML = `<div class="camara ${frontal ? 'espejo' : ''}"><video playsinline muted autoplay></video><div class="mira"></div><p class="cam-msg">Abriendo la cámara…</p></div>`;
+  const video = $('video', cont), msg = $('.cam-msg', cont);
+  const ctl = { activo: true, detener() { this.activo = false; clearTimeout(this.t); if (this.stream) this.stream.getTracks().forEach(t => t.stop()); } };
+  try {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error('Este equipo o navegador no permite usar la cámara.');
+    const [stream, leer] = await Promise.all([
+      navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: frontal ? 'user' : { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } } }),
+      lectorCodigos()
+    ]);
+    ctl.stream = stream;
+    if (!ctl.activo) { ctl.detener(); return ctl; }
+    video.srcObject = stream;
+    await video.play().catch(() => {});
+    msg.textContent = 'Apunta al código de barras';
+    let ultimo = '', cuando = 0;
+    const ciclo = async () => {
+      if (!ctl.activo || !cont.isConnected) { ctl.detener(); return; }
+      let cod = '';
+      try { cod = video.readyState >= 2 ? await leer(video) : ''; } catch (e) { cod = ''; }
+      cod = String(cod || '').trim();
+      if (cod && (cod !== ultimo || Date.now() - cuando > 2500)) {
+        ultimo = cod; cuando = Date.now();
+        if (navigator.vibrate) navigator.vibrate(60);
+        pitido();
+        if (!continuo) ctl.detener();
+        alLeer(cod);
+        if (!continuo) return;
+      }
+      ctl.t = setTimeout(ciclo, 180);
+    };
+    ciclo();
+  } catch (e) {
+    ctl.detener();
+    const txt = e.name === 'NotAllowedError' ? 'Sin permiso para usar la cámara. Permítelo en el candado de la barra de direcciones.' : e.message;
+    msg.textContent = txt;
+    if (alError) alError(txt);
+  }
+  return ctl;
+}
+let AUDIO = null;
+function pitido() {
+  try {
+    AUDIO = AUDIO || new (window.AudioContext || window.webkitAudioContext)();
+    const o = AUDIO.createOscillator(), g = AUDIO.createGain();
+    o.frequency.value = 1400; g.gain.value = 0.08;
+    o.connect(g); g.connect(AUDIO.destination);
+    o.start(); o.stop(AUDIO.currentTime + 0.09);
+  } catch (e) { /* sin sonido */ }
+}
+const buscarPorCodigo = cod => S.idx.barras[cod] || S.idx.codigo[normal(cod)] || S.idx.barras[cod.replace(/^0+/, '')] ||
+  S.catalogo.productos.find(p => p.codigo_barras && String(p.codigo_barras).replace(/^0+/, '') === cod.replace(/^0+/, '')) || null;
+
+/* ---------------- Código de barras Code 128 (para que la caja lea el autocobro) ---------------- */
+const C128 = ['212222', '222122', '222221', '121223', '121322', '131222', '122213', '122312', '132212', '221213', '221312', '231212', '112232', '122132', '122231', '113222',
+  '123122', '123221', '223211', '221132', '221231', '213212', '223112', '312131', '311222', '321122', '321221', '312212', '322112', '322211', '212123', '212321', '232121',
+  '111323', '131123', '131321', '112313', '132113', '132311', '211313', '231113', '231311', '112133', '112331', '132131', '113123', '113321', '133121', '313121', '211331',
+  '231131', '213113', '213311', '213131', '311123', '311321', '331121', '312113', '312311', '332111', '314111', '221411', '431111', '111224', '111422', '121124', '121421',
+  '141122', '141221', '112214', '112412', '122114', '122411', '142112', '142211', '241211', '221114', '413111', '241112', '134111', '111242', '121142', '121241', '114212',
+  '124112', '124211', '411212', '421112', '421211', '212141', '214121', '412121', '111143', '111341', '131141', '114113', '114311', '411113', '411311', '113141', '114131',
+  '311141', '411131', '211412', '211214', '211232', '2331112'];
+function codigoBarrasSVG(texto, alto = 90) {
+  const vals = [104].concat([...texto].map(ch => ch.charCodeAt(0) - 32));
+  const check = vals.reduce((s, v, i) => s + v * (i || 1), 0) % 103;
+  const pats = vals.concat([check]).map(v => C128[v]).concat([C128[106]]);
+  let x = 10;
+  const barras = [];
+  pats.join('').split('').forEach((w, i) => { const n = Number(w); if (i % 2 === 0) barras.push(`<rect x="${x}" y="0" width="${n}" height="${alto}"/>`); x += n; });
+  return `<svg class="cod128" viewBox="0 0 ${x + 10} ${alto}" preserveAspectRatio="none" role="img" aria-label="${esc(texto)}"><rect width="100%" height="100%" fill="#fff"/><g fill="#000">${barras.join('')}</g></svg>`;
+}
+
+/* ---------------- Portal: comprar en la tienda (autocobro) ---------------- */
+const AT = { datos: null, cam: null };
+async function cargarAutocobro() {
+  if (!AT.datos) AT.datos = (await DB.get('autocobro:' + S.usuario.usuario)) || { id: '', almacen_id: '', lineas: [], codigo: '', total: 0, enviado: '' };
+  return AT.datos;
+}
+const guardarAutocobro = () => DB.set('autocobro:' + S.usuario.usuario, AT.datos);
+
+async function vEnTienda(el) {
+  const K = await cargarAutocobro();
+  const cli = S.cliente || {};
+  const tiendas = S.catalogo.tiendas || [];
+  if (AT.cam) { AT.cam.detener(); AT.cam = null; }
+  if (!K.almacen_id || !tiendas.some(t => t.id === K.almacen_id)) {
+    if (tiendas.length === 1) K.almacen_id = tiendas[0].id;
+    else {
+      el.innerHTML = `<div class="titulo"><h2>Comprar en tienda</h2></div><p>¿En qué sucursal estás?</p>
+        <div class="tiendas">${tiendas.map(t => `<button type="button" class="tarjeta" data-t="${esc(t.id)}"><b>${esc(t.nombre)}</b><small>${esc(t.direccion || '')}</small></button>`).join('') || '<p class="vacio">No hay sucursales disponibles.</p>'}</div>`;
+      el.onclick = e => { const b = e.target.closest('[data-t]'); if (b) { K.almacen_id = b.dataset.t; guardarAutocobro(); el.onclick = null; vEnTienda(el); } };
+      return;
+    }
+  }
+  el.onclick = null;
+  const tienda = tiendas.find(t => t.id === K.almacen_id) || {};
+  const precio = p => precioCliente(p, cli);
+  const total = () => K.lineas.reduce((s, l) => { const p = S.idx.prod[l.producto_id]; return s + (p ? precio(p) * l.cantidad : 0); }, 0);
+  if (K.codigo && K.verCodigo) return pintarCodigoAutocobro(el);
+  el.innerHTML = `<div class="titulo"><h2>Comprar en tienda</h2><div class="acciones">${tiendas.length > 1 ? `<button type="button" class="btn sec mini" id="at-tienda">${esc(tienda.nombre)} · cambiar</button>` : `<span class="nota">${esc(tienda.nombre || '')}</span>`}</div></div>
+    <p class="nota">Escanea los productos con tu teléfono mientras compras. Al terminar te damos un código para pagar rápido en caja.</p>
+    <div class="at-botones"><button type="button" class="btn at-grande" id="at-escanear">📷 Escanear productos</button><button type="button" class="btn sec at-grande" id="at-precio">Verificar un precio</button></div>
+    <div id="at-cam"></div>
+    <div id="at-ultimo"></div>
+    <input id="at-q" type="search" placeholder="O busca por nombre o código" autocomplete="off">
+    <div id="at-sug" class="sugerencias-at"></div>
+    <div class="panel"><h3>Tu carrito</h3><div class="cj-lineas" id="at-lineas"></div><div class="cj-total" id="at-total"></div>
+      ${K.codigo ? `<p class="nota">Tu código de caja es <b>AC ${esc(K.codigo)}</b>. Si agregas o quitas productos, vuelve a tocar el botón para actualizarlo.</p>` : ''}
+      <p class="msg" id="at-msg"></p>
+      <div class="acciones"><button type="button" class="btn cobrar" id="at-terminar">${K.codigo ? 'Actualizar y ver mi código' : 'Terminar y pagar en caja'}</button>
+        ${K.lineas.length || K.codigo ? '<button type="button" class="btn sec" id="at-vaciar">Empezar de nuevo</button>' : ''}</div></div>`;
+  const pintarCarrito = () => {
+    K.lineas = K.lineas.filter(l => S.idx.prod[l.producto_id]);
+    $('#at-lineas', el).innerHTML = K.lineas.length ? K.lineas.map((l, i) => {
+      const p = S.idx.prod[l.producto_id];
+      return `<div class="cj-linea"><div class="cj-nombre">${esc(p.nombre)}<small>${dinero(precio(p))} c/u</small></div>
+        <div class="cj-cant"><button type="button" data-menos="${i}">−</button><input type="number" min="0" step="any" data-cant="${i}" value="${l.cantidad}"><button type="button" data-mas="${i}">+</button></div>
+        <b class="cj-imp">${dinero(precio(p) * l.cantidad)}</b><button type="button" class="icono" data-quitar="${i}" aria-label="Quitar">✕</button></div>`;
+    }).join('') : '<p class="nota cj-vacio">Aún no escaneas productos.</p>';
+    $('#at-total', el).innerHTML = `<span>${plural(K.lineas.reduce((s, l) => s + Number(l.cantidad), 0), 'artículo')}</span><b>${dinero(total())}</b>`;
+    $('#at-terminar', el).disabled = !K.lineas.length;
+    guardarAutocobro();
+  };
+  const agregar = p => {
+    const ya = K.lineas.find(l => l.producto_id === p.id);
+    if (ya) ya.cantidad += 1; else K.lineas.push({ producto_id: p.id, cantidad: 1 });
+    $('#at-ultimo', el).innerHTML = `<div class="at-ultimo"><b>${esc(p.nombre)}</b><span class="precio">${dinero(precio(p))}</span><small>Agregado · llevas ${numero(K.lineas.find(l => l.producto_id === p.id).cantidad)}</small></div>`;
+    pintarCarrito();
+  };
+  pintarCarrito();
+  const cerrarCam = () => { if (AT.cam) { AT.cam.detener(); AT.cam = null; } $('#at-cam', el).innerHTML = ''; };
+  $('#at-escanear', el).onclick = async () => {
+    if (AT.cam) { cerrarCam(); $('#at-escanear', el).textContent = '📷 Escanear productos'; return; }
+    $('#at-escanear', el).textContent = 'Cerrar cámara';
+    AT.cam = await abrirCamara($('#at-cam', el), { continuo: true, alLeer: cod => {
+      const p = buscarPorCodigo(cod);
+      if (p) agregar(p); else toast(`El código ${cod} no está en el catálogo. Pregunta en caja.`, 'error');
+    } });
+  };
+  $('#at-precio', el).onclick = async () => {
+    cerrarCam();
+    $('#at-escanear', el).textContent = '📷 Escanear productos';
+    AT.cam = await abrirCamara($('#at-cam', el), { alLeer: cod => {
+      cerrarCam();
+      const p = buscarPorCodigo(cod);
+      const d = abrirModal(p ? p.nombre : 'Producto no encontrado', p ? `<div class="form verif-res-mini"><p class="precio-grande">${dinero(precio(p))}</p>
+          ${Number(p.precio_mayoreo) > 0 && Number(p.precio_mayoreo) !== precio(p) ? `<p>Mayoreo: ${dinero(p.precio_mayoreo)}</p>` : ''}${p.descripcion ? `<p class="nota">${esc(p.descripcion)}</p>` : ''}
+          <div class="pie"><button type="button" class="btn sec" data-cerrar>Cerrar</button><button type="button" class="btn" id="vp-agregar">Agregar al carrito</button></div></div>`
+        : `<div class="form"><p>El código ${esc(cod)} no está en el catálogo. Pregunta a un colaborador.</p><div class="pie"><button type="button" class="btn" data-cerrar>Cerrar</button></div></div>`);
+      const b = $('#vp-agregar', d);
+      if (b) b.onclick = () => { cerrarModal(); agregar(p); };
+    } });
+  };
+  const q = $('#at-q', el), sug = $('#at-sug', el);
+  q.oninput = () => {
+    const v = normal(q.value.trim());
+    const l = v ? S.catalogo.productos.filter(p => coincide(p, v)).sort(porNombre).slice(0, 8) : [];
+    sug.innerHTML = l.map(p => `<button type="button" data-p="${esc(p.id)}"><span>${esc(p.nombre)}</span><b>${dinero(precio(p))}</b></button>`).join('');
+  };
+  q.onkeydown = e => { if (e.key === 'Enter') { const p = buscarPorCodigo(q.value.trim()); if (p) { agregar(p); q.value = ''; sug.innerHTML = ''; } } };
+  sug.onclick = e => { const b = e.target.closest('[data-p]'); if (b) { agregar(S.idx.prod[b.dataset.p]); q.value = ''; sug.innerHTML = ''; } };
+  const lin = $('#at-lineas', el);
+  lin.onclick = e => {
+    const t = e.target;
+    if (t.dataset.mas !== undefined) K.lineas[t.dataset.mas].cantidad += 1;
+    else if (t.dataset.menos !== undefined) { const l = K.lineas[t.dataset.menos]; l.cantidad -= 1; if (l.cantidad <= 0) K.lineas.splice(Number(t.dataset.menos), 1); }
+    else if (t.closest('[data-quitar]')) K.lineas.splice(Number(t.closest('[data-quitar]').dataset.quitar), 1);
+    else return;
+    pintarCarrito();
+  };
+  lin.onchange = e => {
+    const i = e.target.dataset.cant;
+    if (i === undefined) return;
+    const n = Number(e.target.value);
+    if (n > 0) K.lineas[i].cantidad = n; else K.lineas.splice(Number(i), 1);
+    pintarCarrito();
+  };
+  const bt = $('#at-tienda', el);
+  if (bt) bt.onclick = () => { K.almacen_id = ''; guardarAutocobro(); vEnTienda(el); };
+  const bv = $('#at-vaciar', el);
+  if (bv) bv.onclick = async () => {
+    if (!confirm('¿Vaciar tu carrito y empezar una compra nueva?')) return;
+    if (K.id && K.codigo && navigator.onLine) api('cancelarAutocobro', { id: K.id }).catch(() => {});
+    Object.assign(K, { id: '', lineas: [], codigo: '', total: 0, verCodigo: false });
+    guardarAutocobro(); cerrarCam(); vEnTienda(el);
+  };
+  $('#at-terminar', el).onclick = async () => {
+    const msg = $('#at-msg', el);
+    if (!navigator.onLine) { msg.textContent = 'Necesitas internet para generar tu código. Tu carrito se queda guardado.'; return; }
+    if (!K.id) K.id = uuid();
+    try {
+      const r = await conCarga('Generando tu código…', () => api('autocobro', { id: K.id, almacen_id: K.almacen_id, lineas: K.lineas }));
+      Object.assign(K, { codigo: r.codigo, total: r.total, verCodigo: true });
+      guardarAutocobro(); cerrarCam();
+      pintarCodigoAutocobro(el);
+    } catch (e) {
+      msg.textContent = e.message;
+      if (/cobrando|ya no está activo/.test(e.message)) {
+        msg.textContent += ' Toca "Empezar de nuevo" para otra compra.';
+      }
+    }
+  };
+  S.refrescar = pintarCarrito;
+}
+
+function pintarCodigoAutocobro(el) {
+  const K = AT.datos;
+  el.innerHTML = `<div class="at-codigo panel">
+    <h2>Paga en caja</h2>
+    <p>Muestra este código a la persona de caja</p>
+    ${codigoBarrasSVG('AC' + K.codigo)}
+    <p class="at-num">AC ${esc(K.codigo.slice(0, 3))} ${esc(K.codigo.slice(3))}</p>
+    <p class="precio-grande">${dinero(K.total)}</p>
+    <p class="nota">${plural(K.lineas.reduce((s, l) => s + Number(l.cantidad), 0), 'artículo')} · el código vale solo hoy. En caja revisan tu mercancía y cobras con efectivo o tarjeta.</p>
+    <div class="acciones"><button type="button" class="btn sec" id="at-seguir">Seguir comprando</button><button type="button" class="btn" id="at-listo">Ya pagué · nueva compra</button></div>
+  </div>`;
+  $('#at-seguir', el).onclick = () => { K.verCodigo = false; guardarAutocobro(); vEnTienda(el); };
+  $('#at-listo', el).onclick = () => { Object.assign(K, { id: '', lineas: [], codigo: '', total: 0, verCodigo: false }); guardarAutocobro(); irA('mispedidos'); };
+  S.refrescar = null;
+}
+
+/* ---------------- Verificador de precios (tablet fija) ---------------- */
+const VF = { cam: null, t: null, salida: false };
+function bloquearKiosco(activar) {
+  document.body.classList.toggle('kiosco', activar);
+  if (activar && !VF.trampa) {
+    VF.trampa = () => { if (document.body.classList.contains('kiosco')) history.pushState({ kiosco: 1 }, ''); };
+    history.pushState({ kiosco: 1 }, '');
+    window.addEventListener('popstate', VF.trampa);
+    document.addEventListener('contextmenu', e => { if (document.body.classList.contains('kiosco')) e.preventDefault(); });
+  }
+}
+
+function vVerificador(el) {
+  bloquearKiosco(true);
+  const emp = CFG.NOMBRE;
+  el.innerHTML = `<div class="verif">
+    <div class="verif-marca"><img src="${esc(logoSrc())}" alt=""><b>${esc(emp)}</b></div>
+    <div id="vf-inicio" class="verif-inicio">
+      <button type="button" class="verif-btn" id="vf-btn">Verificar un precio</button>
+      <p>Toca el botón y acerca el código de barras del producto a la cámara.</p>
+    </div>
+    <div id="vf-cam" class="verif-cam" hidden></div>
+    <div id="vf-res" class="verif-res" hidden></div>
+    <input id="vf-scan" class="vf-oculto" inputmode="none" autocomplete="off" aria-hidden="true" tabindex="-1">
+    <button type="button" class="vf-salir" id="vf-salir" aria-label="Opciones para colaboradores">⋯</button>
+  </div>`;
+  const ini = $('#vf-inicio', el), cam = $('#vf-cam', el), res = $('#vf-res', el), scan = $('#vf-scan', el);
+  const reiniciar = () => {
+    clearTimeout(VF.t);
+    if (VF.cam) { VF.cam.detener(); VF.cam = null; }
+    cam.hidden = true; cam.innerHTML = ''; res.hidden = true; res.innerHTML = ''; ini.hidden = false;
+    if (!VF.salida) scan.focus({ preventScroll: true });
+  };
+  const mostrar = cod => {
+    if (VF.cam) { VF.cam.detener(); VF.cam = null; }
+    cam.hidden = true; ini.hidden = true; res.hidden = false;
+    const p = buscarPorCodigo(String(cod).trim());
+    res.innerHTML = p ? `<div class="verif-prod">
+        ${p.imagen ? `<div class="verif-img"><img data-img="${esc(p.imagen)}" alt=""></div>` : ''}
+        <div><h2>${esc(p.nombre)}</h2>${p.descripcion ? `<p>${esc(p.descripcion)}</p>` : ''}
+          <p class="verif-precio">${dinero(p.precio_menudeo)}</p>
+          ${Number(p.precio_mayoreo) > 0 && Number(p.precio_mayoreo) < Number(p.precio_menudeo) ? `<p class="verif-mayoreo">Mayoreo: ${dinero(p.precio_mayoreo)}</p>` : ''}
+          <small>${esc(p.unidad || '')}${p.codigo_barras ? ' · ' + esc(p.codigo_barras) : ''}</small></div></div>
+        <button type="button" class="btn sec" id="vf-otro">Verificar otro</button>`
+      : `<div class="verif-no"><h2>No encontramos este producto</h2><p>Pide ayuda a un colaborador.</p><small>${esc(cod)}</small></div>`;
+    if (p && p.imagen) cargarImgs(res);
+    const b = $('#vf-otro', res);
+    if (b) b.onclick = abrir;
+    VF.t = setTimeout(reiniciar, p ? 9000 : 5000);
+  };
+  const abrir = async () => {
+    clearTimeout(VF.t);
+    try { if (!document.fullscreenElement && document.documentElement.requestFullscreen) await document.documentElement.requestFullscreen(); } catch (e) { /* sin pantalla completa */ }
+    res.hidden = true; ini.hidden = true; cam.hidden = false;
+    VF.cam = await abrirCamara(cam, { frontal: true, alLeer: mostrar, alError: () => { VF.t = setTimeout(reiniciar, 6000); } });
+    cam.insertAdjacentHTML('beforeend', '<button type="button" class="btn sec" id="vf-cancelar">Cancelar</button>');
+    $('#vf-cancelar', cam).onclick = reiniciar;
+    VF.t = setTimeout(reiniciar, 25000);
+  };
+  $('#vf-btn', el).onclick = abrir;
+  // Lector USB o Bluetooth (teclado): escribe el código y Enter
+  scan.onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); const v = scan.value.trim(); scan.value = ''; if (v) mostrar(v); } };
+  el.onclick = e => { if (!e.target.closest('button,input') && !VF.salida) scan.focus({ preventScroll: true }); };
+  $('#vf-salir', el).onclick = () => dlgSalirVerificador(reiniciar);
+  S.refrescar = null;
+  reiniciar();
+}
+
+function dlgSalirVerificador(alVolver) {
+  VF.salida = true;
+  const d = abrirModal('Solo colaboradores', `<form id="fvs" class="form" autocomplete="off">
+    <p class="nota">Escribe tu usuario y contraseña de colaborador para salir del verificador.</p>
+    <label>Usuario<input name="usuario" required autocapitalize="none" autocomplete="off"></label>
+    <label>Contraseña<input name="password" type="password" required autocomplete="off"></label>
+    <p class="msg" id="fvs-msg"></p>
+    <div class="pie"><button type="button" class="btn sec" data-cerrar>Volver</button><button class="btn" type="submit">Continuar</button></div></form>`);
+  const vigilar = setInterval(() => { if (!d.open) { clearInterval(vigilar); VF.salida = false; alVolver(); } }, 400);
+  const cerrarAuto = setTimeout(() => { if (d.open) cerrarModal(); }, 60000);
+  $('#fvs', d).onsubmit = async ev => {
+    ev.preventDefault();
+    const usuario = ev.target.usuario.value.trim().toLowerCase(), password = ev.target.password.value;
+    const msg = $('#fvs-msg', d);
+    let nombre = '';
+    try {
+      nombre = (await conCarga('Verificando…', () => api('validarColaborador', { usuario, password }))).nombre;
+    } catch (e) {
+      if (!e.red) { msg.textContent = e.message; ev.target.password.value = ''; return; }
+      const cred = await DB.get('cred:' + usuario);   // sin internet: colaborador que ya entró en este equipo
+      if (!cred || ['CLIENTE', 'VERIFICADOR'].includes(cred.usuario.rol) || await derivar(password, cred.salt) !== cred.hash) {
+        msg.textContent = 'Usuario o contraseña incorrectos (sin internet solo sirven colaboradores que ya entraron en este equipo).';
+        return;
+      }
+      nombre = cred.usuario.nombre;
+    }
+    clearTimeout(cerrarAuto);
+    $('#fvs', d).outerHTML = `<div class="form"><p>Hola, <b>${esc(nombre)}</b>. ¿Qué quieres hacer?</p>
+      <div class="pie pie-col"><button type="button" class="btn sec" id="vs-act">Actualizar precios ahora</button>
+        <button type="button" class="btn peligro" id="vs-salir">Cerrar sesión del verificador</button><button type="button" class="btn" data-cerrar>Volver al verificador</button></div></div>`;
+    $('#vs-act', d).onclick = async () => { await sincronizar(true); };
+    $('#vs-salir', d).onclick = async () => {
+      clearInterval(vigilar); VF.salida = false;
+      bloquearKiosco(false);
+      try { if (document.fullscreenElement) await document.exitFullscreen(); } catch (e) { /* nada */ }
+      if (S.online) api('logout').catch(() => {});
+      await DB.del('sesion');
+      const u = S.usuario.usuario;
+      S.usuario = null; S.token = '';
+      cerrarModal();
+      mostrarLogin(u);
+    };
+  };
+}
+
+/* ---------------- Portal público: pedir sin cuenta y crear cuenta ---------------- */
+const PUB = { datos: null, carrito: null, cat: '', q: '' };
+const telBonito = t => String(t || '').replace(/\D/g, '').replace(/^(\d{3})(\d{3})(\d{4})$/, '$1 $2 $3');
+
+async function abrirPublico(pantalla = 'pedir') {
+  $('#pantalla-login').hidden = true;
+  $('#pantalla-app').hidden = true;
+  const P = $('#pantalla-publica');
+  P.hidden = false;
+  if (pantalla === 'registro') return pintarRegistro(P);
+  PUB.carrito = PUB.carrito || (await DB.get('pub:carrito')) || { lineas: [], modalidad: 'DOMICILIO', fecha: '', horario: '', notas: '', tienda_id: '' };
+  PUB.contacto = PUB.contacto || (await DB.get('pub:contacto')) || { nombre: '', telefono: '', direccion: '' };
+  if (!PUB.datos) {
+    PUB.datos = await DB.get('pub:tienda');
+    if (navigator.onLine) {
+      try {
+        PUB.datos = await conCarga('Cargando el catálogo…', () => api('tiendaPublica'));
+        await DB.set('pub:tienda', PUB.datos);
+      } catch (e) { if (!PUB.datos) { P.innerHTML = `<div class="pub"><p class="txt-error">${esc(e.message)}</p><button type="button" class="btn" id="pub-volver">Volver</button></div>`; $('#pub-volver', P).onclick = salirPublico; return; } }
+    }
+    if (!PUB.datos) { P.innerHTML = '<div class="pub"><p class="aviso-offline">Necesitas internet para ver el catálogo.</p><button type="button" class="btn" id="pub-volver">Volver</button></div>'; $('#pub-volver', P).onclick = salirPublico; return; }
+  }
+  pintarPedidoPublico(P);
+}
+
+function salirPublico() {
+  $('#pantalla-publica').hidden = true;
+  if (location.hash) history.replaceState(null, '', location.pathname + location.search);
+  mostrarLogin();
+}
+
+function cabPublica(titulo) {
+  const nom = CFG.NOMBRE || (PUB.datos && PUB.datos.empresa && PUB.datos.empresa.nombre);
+  return `<header class="cab pub-cab"><div class="marca"><img src="${esc(logoSrc())}" alt="" width="56" height="56"><span>${esc(nom)}</span></div>
+    <div class="acciones"><button type="button" class="btn sec mini" data-pub="registro">Crear cuenta</button><button type="button" class="btn mini" data-pub="entrar">Entrar</button></div></header>
+    <h2 class="pub-tit">${esc(titulo)}</h2>`;
+}
+
+function pintarPedidoPublico(P) {
+  const D = PUB.datos, K = PUB.carrito, C = PUB.contacto;
+  const idx = {};
+  D.catalogo.productos.forEach(p => { idx[p.id] = p; });
+  const tiendas = D.catalogo.tiendas || [];
+  P.innerHTML = `<div class="pub">${cabPublica('Haz tu pedido')}
+    <p class="nota">No necesitas cuenta: déjanos tu nombre, teléfono y dirección. <b>Pagas al recibir o al recoger</b> (efectivo o tarjeta).</p>
+    <div class="caja">
+      <section class="caja-buscar">
+        <input id="pub-q" type="search" placeholder="Busca un producto" value="${esc(PUB.q)}" autocomplete="off">
+        <div class="cats" id="pub-cats"></div><div class="cj-res" id="pub-res"></div>
+      </section>
+      <aside class="caja-ticket">
+        <b>Tu pedido</b>
+        <div class="cj-lineas" id="pub-lineas"></div><div class="cj-total" id="pub-total"></div>
+        <form id="pub-form" class="form" autocomplete="on">
+          <label>Tu nombre<input name="nombre" required autocomplete="name" value="${esc(C.nombre)}"></label>
+          <label>Teléfono (10 dígitos)<input name="telefono" type="tel" required autocomplete="tel" inputmode="tel" value="${esc(telBonito(C.telefono))}"></label>
+          <label>¿Cómo lo recibes?<select name="modalidad"><option value="DOMICILIO">Entrega a domicilio</option><option value="RECOGER" ${K.modalidad === 'RECOGER' ? 'selected' : ''}>Paso a recogerlo</option></select></label>
+          <label data-m="DOMICILIO">Dirección de entrega<input name="direccion" autocomplete="street-address" value="${esc(C.direccion)}" placeholder="Calle, número, colonia y referencias"></label>
+          ${tiendas.length ? `<label data-m="RECOGER">¿En qué tienda?<select name="tienda_id">${tiendas.map(t => `<option value="${esc(t.id)}" ${K.tienda_id === t.id ? 'selected' : ''}>${esc(t.nombre)}${t.direccion ? ' · ' + esc(t.direccion) : ''}</option>`).join('')}</select></label>` : ''}
+          <div class="fila2"><label>Día<input name="fecha" type="date" min="${D.hoy || hoyLocal()}" value="${esc(K.fecha)}"></label>
+            <label>Horario<select name="horario"><option value="">Cualquier hora</option>${(D.horarios_entrega || HORARIOS_ENTREGA).map(h => `<option value="${h}" ${K.horario === h ? 'selected' : ''}>${h.replace('-', ' a ')}</option>`).join('')}</select></label></div>
+          <label>Notas<input name="notas" value="${esc(K.notas)}" placeholder="Algo que debamos saber"></label>
+          <p class="msg" id="pub-msg"></p>
+          <button class="btn cobrar" type="submit" id="pub-enviar">Enviar pedido</button>
+        </form>
+      </aside>
+    </div>
+    <div id="pub-mios"></div>
+    <div class="cj-movil"><button type="button" class="cj-ver" id="pub-ver"></button></div>
+  </div>`;
+  const f = $('#pub-form', P);
+  const guardar = () => { DB.set('pub:carrito', K); DB.set('pub:contacto', C); };
+  const verMod = () => $$('[data-m]', P).forEach(x => { x.hidden = x.dataset.m !== f.modalidad.value; });
+  verMod();
+  $('#pub-cats', P).innerHTML = [['', 'Todo']].concat(D.catalogo.categorias.slice().sort(porNombre).map(c => [c.id, c.nombre]))
+    .map(([id, n]) => `<button type="button" data-cat="${esc(id)}" class="${PUB.cat === id ? 'activo' : ''}">${esc(n)}</button>`).join('');
+  const pintarRes = () => {
+    const q = normal(PUB.q);
+    const l = D.catalogo.productos.filter(p => (!PUB.cat || p.categoria_id === PUB.cat) && (!q || coincide(p, q))).sort(porNombre).slice(0, 80);
+    $('#pub-res', P).innerHTML = l.map(p => `<button type="button" class="prod" data-p="${esc(p.id)}"><b>${esc(p.nombre)}</b>
+      <span class="fila-oc"><span class="precio">${dinero(p.precio_menudeo)}</span><small class="${p.disponible ? 'txt-ok' : 'txt-error'}">${p.disponible ? 'Disponible' : 'Agotado'}</small></span></button>`).join('') || '<p class="nota">Sin productos.</p>';
+  };
+  const total = () => K.lineas.reduce((s, l) => s + (idx[l.producto_id] ? Number(idx[l.producto_id].precio_menudeo) * l.cantidad : 0), 0);
+  const pintarCarrito = () => {
+    K.lineas = K.lineas.filter(l => idx[l.producto_id]);
+    $('#pub-lineas', P).innerHTML = K.lineas.length ? K.lineas.map((l, i) => {
+      const p = idx[l.producto_id];
+      return `<div class="cj-linea"><div class="cj-nombre">${esc(p.nombre)}<small>${dinero(p.precio_menudeo)} c/u</small></div>
+        <div class="cj-cant"><button type="button" data-menos="${i}">−</button><input type="number" min="0" step="any" data-cant="${i}" value="${l.cantidad}"><button type="button" data-mas="${i}">+</button></div>
+        <b class="cj-imp">${dinero(Number(p.precio_menudeo) * l.cantidad)}</b><button type="button" class="icono" data-quitar="${i}" aria-label="Quitar">✕</button></div>`;
+    }).join('') : '<p class="nota cj-vacio">Toca un producto para agregarlo.</p>';
+    $('#pub-total', P).innerHTML = `<span>${plural(K.lineas.length, 'producto')}</span><b>${dinero(total())}</b>`;
+    $('#pub-ver', P).innerHTML = `<small>${plural(K.lineas.length, 'producto')} · ver pedido</small><b>${dinero(total())}</b>`;
+    $('#pub-enviar', P).disabled = !K.lineas.length;
+    guardar();
+  };
+  pintarRes(); pintarCarrito();
+  $('#pub-q', P).oninput = e => { PUB.q = e.target.value; pintarRes(); };
+  $('#pub-cats', P).onclick = e => { const b = e.target.closest('[data-cat]'); if (b) { PUB.cat = b.dataset.cat; $$('#pub-cats button', P).forEach(x => x.classList.toggle('activo', x === b)); pintarRes(); } };
+  $('#pub-res', P).onclick = e => {
+    const b = e.target.closest('[data-p]');
+    if (!b) return;
+    const ya = K.lineas.find(l => l.producto_id === b.dataset.p);
+    if (ya) ya.cantidad += 1; else K.lineas.push({ producto_id: b.dataset.p, cantidad: 1 });
+    pintarCarrito();
+  };
+  const lin = $('#pub-lineas', P);
+  lin.onclick = e => {
+    const t = e.target;
+    if (t.dataset.mas !== undefined) K.lineas[t.dataset.mas].cantidad += 1;
+    else if (t.dataset.menos !== undefined) { const l = K.lineas[t.dataset.menos]; l.cantidad -= 1; if (l.cantidad <= 0) K.lineas.splice(Number(t.dataset.menos), 1); }
+    else if (t.closest('[data-quitar]')) K.lineas.splice(Number(t.closest('[data-quitar]').dataset.quitar), 1);
+    else return;
+    pintarCarrito();
+  };
+  lin.onchange = e => { const i = e.target.dataset.cant; if (i === undefined) return; const n = Number(e.target.value); if (n > 0) K.lineas[i].cantidad = n; else K.lineas.splice(Number(i), 1); pintarCarrito(); };
+  f.oninput = () => {
+    Object.assign(C, { nombre: f.nombre.value, telefono: f.telefono.value.replace(/\D/g, ''), direccion: f.direccion.value });
+    Object.assign(K, { modalidad: f.modalidad.value, fecha: f.fecha.value, horario: f.horario.value, notas: f.notas.value, tienda_id: f.tienda_id ? f.tienda_id.value : '' });
+    verMod(); guardar();
+  };
+  f.onchange = f.oninput;
+  $('#pub-ver', P).onclick = () => $('.caja-ticket', P).scrollIntoView({ behavior: 'smooth' });
+  f.onsubmit = async ev => {
+    ev.preventDefault();
+    f.oninput();
+    const msg = $('#pub-msg', P);
+    if (!navigator.onLine) { msg.textContent = 'Necesitas internet para enviar el pedido. Se queda guardado en este equipo.'; return; }
+    if (!K.id) { K.id = uuid(); guardar(); }
+    try {
+      const r = await conCarga('Enviando pedido…', () => api('pedidoPublico', { pedido: { id: K.id, nombre: C.nombre, telefono: C.telefono, direccion: C.direccion,
+        modalidad: K.modalidad, tienda_id: K.tienda_id, fecha_entrega: K.fecha, horario_entrega: K.horario, notas: K.notas, lineas: K.lineas } }));
+      const mios = (await DB.get('pub:pedidos')) || [];
+      mios.unshift({ id: r.pedido.id, folio: r.pedido.folio });
+      await DB.set('pub:pedidos', mios.slice(0, 20));
+      PUB.carrito = { lineas: [], modalidad: K.modalidad, fecha: '', horario: '', notas: '', tienda_id: K.tienda_id };
+      await DB.set('pub:carrito', PUB.carrito);
+      P.innerHTML = `<div class="pub">${cabPublica('¡Gracias, ' + C.nombre.split(' ')[0] + '!')}
+        <div class="panel at-codigo"><p>Recibimos tu pedido</p><p class="at-num">${esc(r.pedido.folio)}</p><p class="precio-grande">${dinero(r.pedido.total)}</p>
+          <p>${r.pedido.modalidad === 'RECOGER' ? 'Pasa a recogerlo' : 'Te lo llevamos'}${r.pedido.fecha_entrega ? ' el ' + fechaCorta(r.pedido.fecha_entrega) : ''}${r.pedido.horario_entrega ? ' de ' + r.pedido.horario_entrega.replace('-', ' a ') : ''}. Pagas en ese momento.</p>
+          <p class="nota">Te llamaremos al ${esc(telBonito(C.telefono))} si hay algún cambio.</p>
+          <div class="acciones"><button type="button" class="btn" id="pub-otro">Hacer otro pedido</button><button type="button" class="btn sec" data-pub="registro">Crear mi cuenta para guardar mis datos</button></div></div>
+        <div id="pub-mios"></div></div>`;
+      $('#pub-otro', P).onclick = () => pintarPedidoPublico(P);
+      enlazarPublico(P);
+      pintarMisPedidosPublicos(P);
+    } catch (e) { msg.textContent = e.message; }
+  };
+  enlazarPublico(P);
+  pintarMisPedidosPublicos(P);
+}
+
+function enlazarPublico(P) {
+  $$('[data-pub]', P).forEach(b => {
+    b.onclick = () => (b.dataset.pub === 'registro' ? pintarRegistro(P) : salirPublico());
+  });
+}
+
+async function pintarMisPedidosPublicos(P) {
+  const mios = (await DB.get('pub:pedidos')) || [];
+  const c = $('#pub-mios', P);
+  if (!c || !mios.length || !navigator.onLine || !PUB.contacto || !PUB.contacto.telefono) return;
+  try {
+    const [l, av] = await Promise.all([api('pedidosPublicos', { telefono: PUB.contacto.telefono, ids: mios.map(x => x.id) }),
+      api('avisosPublicos', { telefono: PUB.contacto.telefono, ids: mios.map(x => x.id) }).catch(() => [])]);
+    notificarNuevos(av, 'pub:avisosVistos', './#pedir');
+    if (!l.length || !c.isConnected) return;
+    c.innerHTML = `<div class="panel"><h3>Tus pedidos desde este teléfono</h3>
+      ${permisoNotif() === 'default' ? '<button type="button" class="btn sec mini" id="pub-notif">🔔 Avísame en este teléfono cuando cambien</button>' : ''}
+      ${av.length ? `<ul class="lista avisos">${av.slice(0, 5).map(a => `<li><span class="av-ico">${iconoAviso(a.tipo)}</span><span><b>${esc(a.titulo)}</b><small>${esc(a.mensaje)}</small></span></li>`).join('')}</ul>` : ''}
+      <ul class="lista">${l.sort((a, b) => String(b.fecha).localeCompare(String(a.fecha))).map(p => `<li><span><b>${esc(p.folio)}</b> · ${dinero(p.total)}
+      <small>${p.fecha_entrega ? 'Entrega ' + fechaCorta(p.fecha_entrega) : 'Sin fecha'}${entregaTxt(p) ? ' · ' + entregaTxt(p) : ''}</small></span>${chipPed(p.estado)}</li>`).join('')}</ul></div>`;
+    const bn = $('#pub-notif', c);
+    if (bn) bn.onclick = async () => { if (await pedirPermisoNotif()) bn.remove(); };
+    clearTimeout(PUB.reloj);
+    PUB.reloj = setTimeout(() => { if (c.isConnected && document.visibilityState === 'visible') pintarMisPedidosPublicos(P); }, 5 * 60000);
+  } catch (e) { /* sin conexión */ }
+}
+
+function pintarRegistro(P) {
+  const C = PUB.contacto || {};
+  P.hidden = false;
+  $('#pantalla-login').hidden = true;
+  P.innerHTML = `<div class="pub pub-reg">${cabPublica('Crea tu cuenta')}
+    <form id="reg-form" class="panel form" autocomplete="on">
+      <p class="nota">Solo eliges un usuario y una contraseña: guardamos tus datos y tus pedidos para la próxima vez. No tienes que confirmar nada.</p>
+      <div class="fila2"><label>Usuario<input name="usuario" required autocapitalize="none" autocomplete="username" placeholder="ej. rosa.perez"></label>
+        <label>Contraseña<input name="password" type="password" required minlength="6" autocomplete="new-password"></label></div>
+      <label>Nombre<input name="nombre" required autocomplete="name" value="${esc(C.nombre || '')}"></label>
+      <label>Teléfono (10 dígitos)<input name="telefono" type="tel" required inputmode="tel" autocomplete="tel" value="${esc(telBonito(C.telefono))}"></label>
+      <label>Dirección <small>(para tus entregas)</small><input name="direccion" autocomplete="street-address" value="${esc(C.direccion || '')}"></label>
+      <label>Correo <small>(opcional)</small><input name="email" type="email" autocomplete="email"></label>
+      <p class="nota">Si ya pediste antes sin cuenta con este teléfono, verás esos pedidos en tu cuenta. El crédito lo autoriza el negocio.</p>
+      <p class="msg" id="reg-msg"></p>
+      <div class="pie"><button type="button" class="btn sec" id="reg-pedir">Pedir sin cuenta</button><button class="btn" type="submit">Crear cuenta y entrar</button></div>
+    </form></div>`;
+  enlazarPublico(P);
+  $('#reg-pedir', P).onclick = () => abrirPublico('pedir');
+  $('#reg-form', P).onsubmit = async ev => {
+    ev.preventDefault();
+    const f = ev.target, msg = $('#reg-msg', P);
+    if (!navigator.onLine) { msg.textContent = 'Necesitas internet para crear tu cuenta.'; return; }
+    const usuario = f.usuario.value.trim().toLowerCase(), password = f.password.value;
+    try {
+      const r = await conCarga('Creando tu cuenta…', () => api('registroCliente', { usuario, password, nombre: f.nombre.value.trim(),
+        telefono: f.telefono.value, direccion: f.direccion.value.trim(), email: f.email.value.trim() }));
+      await guardarCredencial(usuario, password, r.usuario, r.token);
+      const ses = { token: r.token, usuario: r.usuario, offline: false };
+      await DB.set('sesion', ses);
+      await cargarSesion(ses);
+      P.hidden = true;
+      if (location.hash) history.replaceState(null, '', location.pathname + location.search);
+      S.vista = 'inicio';
+      mostrarApp();
+      await sincronizar();
+      toast('¡Listo! Tu cuenta quedó creada.', 'ok');
+    } catch (e) { msg.textContent = e.message; }
+  };
+}
+
+/* ---- Portal con cuenta: mis datos y vencimientos ---- */
+function avisoCredito(c) {
+  if (!c || !c.credito) return '';
+  const v = c.vencimientos || [];
+  const vencidos = v.filter(x => x.dias < 0), pronto = v.filter(x => x.dias >= 0 && x.dias <= 7);
+  if (vencidos.length) return `<div class="aviso-credito rojo"><b>Tienes ${plural(vencidos.length, 'pago')} vencido${vencidos.length === 1 ? '' : 's'} por ${dinero(vencidos.reduce((s, x) => s + x.saldo, 0))}.</b>
+    Mientras no se liquide no puedes pedir a crédito; puedes pedir y pagar al recibir.</div>`;
+  if (pronto.length) return `<div class="aviso-credito"><b>${pronto.length === 1 ? 'Un pago vence' : pronto.length + ' pagos vencen'} pronto:</b>
+    ${pronto.map(x => `${dinero(x.saldo)} ${x.dias === 0 ? 'hoy' : `el ${fechaCorta(x.vence)} (${plural(x.dias, 'día')})`}`).join(' · ')}</div>`;
+  return '';
+}
+
+function dlgMisDatos() {
+  const c = S.cliente || {};
+  const d = abrirModal('Mis datos', `<form id="fmd" class="form">
+    <label>Nombre<input name="nombre" required value="${esc(c.nombre || '')}"></label>
+    <label>Teléfono<input name="telefono" type="tel" required value="${esc(telBonito(c.telefono))}"></label>
+    <label>Dirección de entrega<input name="direccion" value="${esc(c.direccion || '')}"></label>
+    <label>Correo<input name="email" type="email" value="${esc(c.email || '')}"></label>
+    <p class="msg" id="fmd-msg"></p>
+    <div class="pie"><button type="button" class="btn sec" data-cerrar>Cancelar</button><button class="btn" type="submit">Guardar</button></div></form>`);
+  $('#fmd', d).onsubmit = async ev => {
+    ev.preventDefault();
+    const f = ev.target;
+    try {
+      await conCarga('Guardando…', () => api('guardarMisDatos', { nombre: f.nombre.value.trim(), telefono: f.telefono.value, direccion: f.direccion.value.trim(), email: f.email.value.trim() }));
+      cerrarModal(); toast('Datos guardados.', 'ok'); sincronizar();
+    } catch (e) { $('#fmd-msg', d).textContent = e.message; }
+  };
+}
+
+/* ---------------- Avisos al cliente (notificaciones) ---------------- */
+const permisoNotif = () => ('Notification' in window ? Notification.permission : 'no');
+async function pedirPermisoNotif() {
+  if (!('Notification' in window)) { toast('Este navegador no permite notificaciones. Instala la app o usa Chrome.', 'error'); return false; }
+  const r = await Notification.requestPermission();
+  if (r === 'granted') { toast('Listo: te avisaremos en este teléfono.', 'ok'); return true; }
+  toast('No se activaron las notificaciones. Puedes permitirlas en el candado de la barra de direcciones.', '');
+  return false;
+}
+async function mostrarNotificacion(titulo, cuerpo, url = './', tag = '') {
+  if (permisoNotif() !== 'granted') return;
+  const op = { body: cuerpo, icon: 'icons/icon-192.png', badge: 'icons/icon-192.png', tag: tag || undefined, data: { url } };
+  try {
+    const reg = navigator.serviceWorker && await navigator.serviceWorker.getRegistration();
+    if (reg) { await reg.showNotification(titulo, op); return; }
+  } catch (e) { /* sigue */ }
+  try { new Notification(titulo, op); } catch (e) { /* sin notificaciones */ }
+}
+// Muestra como notificación del teléfono los avisos que aún no se han visto en este equipo
+async function notificarNuevos(lista, clave, url) {
+  if (!lista || !lista.length) return;
+  const vistos = new Set((await DB.get(clave)) || []);
+  const nuevos = lista.filter(a => !vistos.has(a.id));
+  if (!nuevos.length) return;
+  nuevos.slice(0, 3).reverse().forEach(a => mostrarNotificacion(a.titulo, a.mensaje, url, a.id));
+  if (document.visibilityState === 'visible') nuevos.slice(0, 2).forEach(a => toast(a.titulo, 'ok'));
+  lista.forEach(a => vistos.add(a.id));
+  await DB.set(clave, [...vistos].slice(-300));
+}
+const iconoAviso = t => ({ PEDIDO: '📦', CREDITO: '💳', COBRANZA: '⏰', AUTOCOBRO: '🧾' })[t] || '🔔';
+
+async function vAvisos(el) {
+  el.innerHTML = `<div class="titulo"><h2>Avisos</h2>${permisoNotif() === 'granted' ? '' : '<button type="button" class="btn" id="av-perm">Activar notificaciones en este teléfono</button>'}</div><div id="av-lista"></div>`;
+  const bp = $('#av-perm', el);
+  if (bp) bp.onclick = async () => { if (await pedirPermisoNotif()) bp.remove(); };
+  const c = $('#av-lista', el);
+  const l = await pedir(c, 'Cargando avisos…', () => api('avisosCliente'));
+  if (!l) return;
+  c.innerHTML = l.length ? `<ul class="lista avisos">${l.map(a => `<li class="${a.leido ? '' : 'no-leido'}"><span class="av-ico">${iconoAviso(a.tipo)}</span>
+      <span><b>${esc(a.titulo)}</b><small>${esc(a.mensaje)}</small><small class="nota">${fechaHora(a.creado)}</small></span></li>`).join('')}</ul>`
+    : '<p class="vacio">Aquí verás cuándo se programa, sale o se entrega tu pedido, los cambios de tu crédito y tus vencimientos.</p>';
+  if (l.some(a => !a.leido)) {
+    api('leerAvisos').catch(() => {});
+    if (S.avisosCliente) { S.avisosCliente.no_leidos = 0; S.avisosCliente.nuevos = []; DB.set('avisosCliente', S.avisosCliente); pintarMenu(); }
+  }
+  S.refrescar = null;
+}
+
 /* ---------------- Arranque ---------------- */
 async function iniciar() {
   document.title = CFG.NOMBRE;
@@ -5574,6 +7518,9 @@ async function iniciar() {
   await cargarApariencia().catch(() => {});
 
   $('#form-login').addEventListener('submit', onLogin);
+  $('#login-pedir').addEventListener('click', () => abrirPublico('pedir'));
+  $('#login-registro').addEventListener('click', () => abrirPublico('registro'));
+  $('#login-pub').hidden = CFG.PORTAL_PUBLICO === false;
   $('#menu').addEventListener('click', e => { const b = e.target.closest('[data-v]'); if (b) irA(b.dataset.v); });
   $('#estado').addEventListener('click', () => sincronizar(true));
   $('#dlg').addEventListener('click', e => { if (e.target.closest('[data-cerrar]')) cerrarModal(); });
@@ -5592,15 +7539,17 @@ async function iniciar() {
   });
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible' && S.usuario && navigator.onLine &&
-        Date.now() - S.ultimaSync > CFG.SYNC_MINUTOS * 60000) sincronizar();
+        Date.now() - S.ultimaSync > (rol() === 'CLIENTE' ? 2 : CFG.SYNC_MINUTOS) * 60000) sincronizar();
   });
 
   const ses = await DB.get('sesion');
   if (ses && ses.usuario) {
     await cargarSesion(ses);
-    S.vista = rol() === 'CAJERO' ? 'caja' : 'inicio';
+    S.vista = vistaInicial();
     mostrarApp();
     if (navigator.onLine) sincronizar();
+  } else if (/^#(pedir|registro)$/.test(location.hash) && CFG.PORTAL_PUBLICO !== false) {
+    await abrirPublico(location.hash.slice(1));
   } else {
     mostrarLogin('', /^https?:\/\//.test(CFG.API_URL) ? '' : 'Falta configurar API_URL en config.js.');
   }

@@ -1,6 +1,6 @@
 // Guarda la app en el equipo para que abra sin internet.
 // Al publicar cambios, sube el número de CACHE para forzar la actualización.
-const CACHE = 'inventario-v13';
+const CACHE = 'inventario-v17';
 const ARCHIVOS = ['./', './index.html', './app.js', './excel.js', './config.js', './styles.css', './manifest.json', './cargando.svg',
   './icons/icon-192.png', './icons/icon-512.png'];
 
@@ -25,5 +25,16 @@ self.addEventListener('fetch', e => {
     const red = fetch(req).then(r => { if (r.ok) cache.put(req, r.clone()); return r; }).catch(() => null);
     if (enCache) { e.waitUntil(red); return enCache; }
     return (await red) || new Response('Sin conexión', { status: 503 });
+  }));
+});
+
+// Al tocar una notificación se abre (o se enfoca) la app
+self.addEventListener('notificationclick', e => {
+  e.notification.close();
+  const destino = (e.notification.data && e.notification.data.url) || './';
+  e.waitUntil(self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(l => {
+    const abierta = l.find(c => 'focus' in c);
+    if (abierta) { if (destino !== './' && 'navigate' in abierta) abierta.navigate(destino).catch(() => {}); return abierta.focus(); }
+    return self.clients.openWindow(destino);
   }));
 });
