@@ -375,6 +375,11 @@ Cómo le llega:
 
 También puede **verificar un precio** sin agregarlo.
 
+## Menú y verificar precio
+
+- El menú está agrupado por áreas: **Vender** (Caja, Ventas y cortes, Clientes, Por cobrar, Pedidos), **Inventario**, **Compras**, **Personal** y **Ajustes**. Cada área abre su lista y muestra la burbuja de pendientes.
+- **Verificar precio:** botón flotante abajo a la derecha (o la tecla **F2**) en cualquier pantalla menos la Caja. Aceptas el lector de códigos, escribir el nombre o usar la cámara. Muestra precio, mayoreo, existencia aquí y en todas las sucursales (y costo y margen para administradores). El botón se hace pequeño y transparente si no lo usas y se esconde al bajar por la página.
+
 ## Verificador de precios (tablet en la pared)
 
 1. En **Usuarios**, crea un usuario con rol **Verificador de precios** (no se le pide cambiar contraseña y su sesión no vence).

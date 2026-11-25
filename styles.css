@@ -781,3 +781,35 @@ body.kiosco { user-select: none; -webkit-user-select: none; overscroll-behavior:
 .aviso-nuevo span:first-child { font-size: 1.5rem; }
 .aviso-nuevo small { display: block; color: var(--suave); }
 .btn.wa { background: #25d366; border-color: #25d366; color: #fff; text-decoration: none; }
+
+/* ---- v5.7.3: menú por áreas y burbuja de verificar precio ---- */
+.menu { flex-wrap: wrap; overflow: visible; position: relative; z-index: 30; align-items: center; }
+.menu-grupo { position: relative; }
+.menu-grupo.activo > .menu-cab { background: var(--primario-suave); color: var(--primario); }
+.menu-cab .flecha { font-size: .75em; margin-left: .35em; opacity: .7; }
+.menu-lista { position: absolute; top: calc(100% + 4px); left: 0; min-width: 220px; background: var(--panel); border: 1px solid var(--borde);
+  border-radius: 12px; box-shadow: 0 12px 30px rgba(0, 0, 0, .15); padding: 6px; display: flex; flex-direction: column; gap: 2px; z-index: 40; }
+.menu-lista[hidden] { display: none; }
+.menu-lista button { text-align: left; width: 100%; display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+.menu-lista button:hover { background: var(--bg); }
+@media (max-width: 640px) {
+  .menu { gap: 2px; padding: 6px 8px; }
+  .menu button { padding: .45em .6em; }
+  .menu-grupo { position: static; }
+  .menu-lista { left: 8px; right: 8px; min-width: 0; }
+}
+.burbuja-precio { position: fixed; right: 18px; bottom: 18px; z-index: 50; display: flex; align-items: center; gap: 8px; border: 0; cursor: pointer;
+  background: var(--primario); color: var(--primario-txt); font: inherit; font-weight: 700; padding: 12px 18px; border-radius: 999px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .25); transition: opacity .4s, transform .3s, padding .3s; }
+.burbuja-precio .bp-ico { font-size: 1.3rem; }
+.burbuja-precio.dormida { opacity: .35; padding: 12px; }
+.burbuja-precio.dormida .bp-txt { display: none; }
+.burbuja-precio.dormida:hover { opacity: 1; }
+.burbuja-precio.escondida { transform: translateY(120px); }
+.burbuja-precio[hidden] { display: none; }
+.vp-buscar { display: flex; gap: 8px; align-items: flex-start; }
+.vp-buscar > div { flex: 1; }
+.vp-prod { display: flex; gap: 16px; align-items: center; }
+.vp-prod img { width: 120px; height: 120px; object-fit: contain; border-radius: 10px; }
+.vp-prod h3 { margin: 0; }
+@media print { .burbuja-precio { display: none !important; } }

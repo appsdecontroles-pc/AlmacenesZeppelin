@@ -5,7 +5,7 @@
 
 const CFG = Object.assign({ NOMBRE: 'Control de Inventario', SYNC_MINUTOS: 15, API_URL: '' }, window.APP_CONFIG || {});
 CFG.NOMBRE_ORIGINAL = CFG.NOMBRE;
-const VERSION_APP = '5.7.2';
+const VERSION_APP = '5.7.3';
 
 const ROL_TXT = {
   ADMIN_GENERAL: 'Administrador general',
@@ -514,6 +514,7 @@ function mostrarLogin(usuario = '', msg = '') {
   $('#pantalla-app').hidden = true;
   $('#pantalla-publica').hidden = true;
   $('#pantalla-login').hidden = false;
+  actualizarBurbujaPrecio();
   const f = $('#form-login');
   if (usuario) f.usuario.value = usuario;
   $('#login-msg').textContent = msg;
@@ -523,6 +524,7 @@ function mostrarLogin(usuario = '', msg = '') {
 
 function mostrarApp() {
   bloquearKiosco(rol() === 'VERIFICADOR');
+  setTimeout(actualizarBurbujaPrecio, 0);
   $('#pantalla-login').hidden = true;
   $('#pantalla-publica').hidden = true;
   $('#pantalla-app').hidden = false;
@@ -531,22 +533,48 @@ function mostrarApp() {
   actualizarBarra();
 }
 
+// Menú agrupado por áreas; cada entrada es [vista, título, pestaña opcional]
+const GRUPOS_MENU = [
+  ['Vender', [['caja', 'Caja'], ['ventas', 'Ventas y cortes', 'ventas'], ['ventas', 'Clientes', 'clientes'], ['ventas', 'Por cobrar', 'cobrar'], ['pedidos', 'Pedidos']]],
+  ['Inventario', [['productos', 'Productos'], ['inventario', 'Inventario'], ['movimientos', 'Movimientos'], ['analisis', 'Análisis y temporadas'], ['almacenes', 'Almacenes']]],
+  ['Compras', [['compras', 'Compras y proveedores'], ['pagar', 'Por pagar']]],
+  ['Personal', [['personal', 'Personal y nómina'], ['checador', 'Checador']]],
+  ['Ajustes', [['usuarios', 'Usuarios'], ['cuenta', 'Mi cuenta']]]
+];
+function burbujaVista(k) {
+  return k === 'pagar' && S.alertas ? S.alertas.vencidas + S.alertas.por_vencer
+    : k === 'pedidos' && S.avisos ? S.avisos.solicitados + S.avisos.por_surtir + (rol() === 'ADMIN_SUCURSAL' ? S.avisos.en_ruta : 0)
+    : k === 'personal' && S.personalAvisos ? S.personalAvisos.vacaciones + S.personalAvisos.adelantos
+    : k === 'analisis' && S.temporadasAviso ? S.temporadasAviso.length
+    : k === 'avisos' && S.avisosCliente ? S.avisosCliente.no_leidos : 0;
+}
+const esActivaMenu = (k, tab) => S.vista === k && (!tab || (typeof VT !== 'undefined' && VT.pestana === tab));
 function pintarMenu() {
-  $('#menu').innerHTML = Object.keys(VISTAS).filter(puedeVer)
-    .map(k => {
-      const n = k === 'pagar' && S.alertas ? S.alertas.vencidas + S.alertas.por_vencer
-        : k === 'pedidos' && S.avisos ? S.avisos.solicitados + S.avisos.por_surtir + (rol() === 'ADMIN_SUCURSAL' ? S.avisos.en_ruta : 0)
-        : k === 'personal' && S.personalAvisos ? S.personalAvisos.vacaciones + S.personalAvisos.adelantos
-        : k === 'analisis' && S.temporadasAviso ? S.temporadasAviso.length
-        : k === 'avisos' && S.avisosCliente ? S.avisosCliente.no_leidos : 0;
-      return `<button type="button" data-v="${k}" class="${S.vista === k ? 'activo' : ''}">${VISTAS[k].titulo}${n ? `<span class="burbuja ${k === 'pagar' && S.alertas.vencidas ? 'roja' : ''}">${n}</span>` : ''}</button>`;
-    }).join('');
+  const chip = (n, roja) => (n ? `<span class="burbuja ${roja ? 'roja' : ''}">${n}</span>` : '');
+  const boton = (k, t, tab) => `<button type="button" data-v="${k}" ${tab ? `data-tab="${tab}"` : ''} class="${esActivaMenu(k, tab) ? 'activo' : ''}">${t}${tab && tab !== 'ventas' ? '' : chip(burbujaVista(k), k === 'pagar' && S.alertas && S.alertas.vencidas)}</button>`;
+  // Clientes y verificador: pocas opciones, menú simple
+  if (['CLIENTE', 'VERIFICADOR'].includes(rol())) {
+    $('#menu').innerHTML = Object.keys(VISTAS).filter(puedeVer).map(k => boton(k, VISTAS[k].titulo)).join('');
+    return;
+  }
+  const html = [boton('inicio', 'Inicio')];
+  GRUPOS_MENU.forEach(([nombre, items]) => {
+    const vis = items.filter(([k]) => VISTAS[k] && puedeVer(k));
+    if (!vis.length) return;
+    if (vis.length === 1) { html.push(boton(vis[0][0], vis[0][1], vis[0][2])); return; }
+    const n = [...new Set(vis.map(x => x[0]))].reduce((s, k) => s + (burbujaVista(k) || 0), 0);
+    const activo = vis.some(([k, , tab]) => esActivaMenu(k, tab));
+    html.push(`<div class="menu-grupo ${activo ? 'activo' : ''}"><button type="button" class="menu-cab" aria-haspopup="true" aria-expanded="false">${nombre}${chip(n)}<span class="flecha">▾</span></button>
+      <div class="menu-lista" hidden>${vis.map(([k, t, tab]) => boton(k, t, tab)).join('')}</div></div>`);
+  });
+  $('#menu').innerHTML = html.join('');
 }
 
 function irA(k) {
   S.vista = k;
   pintarMenu();
   pintarVista();
+  actualizarBurbujaPrecio();
   window.scrollTo(0, 0);
 }
 
@@ -1491,6 +1519,8 @@ function selectorProducto(cont, alElegir) {
     $('button', ele).onclick = () => { elegir(null); q.focus(); };
   };
   ctl.limpiar = () => elegir(null);
+  ctl.elegir = elegir;
+  ctl.buscarOtro = () => { q.hidden = false; ele.hidden = true; q.value = ''; q.focus(); };   // deja el resultado y vuelve a escuchar el lector
   q.oninput = () => {
     const v = normal(q.value.trim());
     if (!v) { sug.hidden = true; return; }
@@ -7498,6 +7528,81 @@ async function vAvisos(el) {
   S.refrescar = null;
 }
 
+/* ---------------- Burbuja "Verificar precio" para el personal ---------------- */
+const BP = { t: null };
+const burbujaPrecioVisible = () => S.usuario && !['CLIENTE', 'VERIFICADOR'].includes(rol()) && !['caja', 'checador'].includes(S.vista)
+  && !$('#pantalla-app').hidden && !(BP.oculta);
+function iniciarBurbujaPrecio() {
+  if ($('#burbuja-precio')) return;
+  const b = document.createElement('button');
+  b.id = 'burbuja-precio'; b.type = 'button'; b.className = 'burbuja-precio';
+  b.title = 'Verificar un precio (F2)';
+  b.innerHTML = '<span class="bp-ico">🏷️</span><span class="bp-txt">Verificar precio</span>';
+  b.hidden = true;
+  document.body.appendChild(b);
+  b.onclick = abrirVerificarPrecio;
+  const despertar = () => {
+    if (b.hidden) return;
+    b.classList.remove('dormida');
+    clearTimeout(BP.t);
+    BP.t = setTimeout(() => b.classList.add('dormida'), 5000);
+  };
+  ['mousemove', 'touchstart', 'keydown'].forEach(ev => document.addEventListener(ev, despertar, { passive: true }));
+  let ultimoY = 0;
+  window.addEventListener('scroll', () => {
+    const y = window.scrollY;
+    b.classList.toggle('escondida', y > ultimoY + 4 && y > 200);   // se esconde al bajar, vuelve al subir
+    if (y < ultimoY - 4) b.classList.remove('escondida');
+    ultimoY = y;
+  }, { passive: true });
+  despertar();
+}
+function actualizarBurbujaPrecio() {
+  const b = $('#burbuja-precio');
+  if (b) b.hidden = !burbujaPrecioVisible();
+}
+
+function abrirVerificarPrecio() {
+  const miAlm = S.usuario.almacen_id;
+  const verCosto = !['CAJERO'].includes(rol());
+  const d = abrirModal('Verificar precio', `<div class="form vp">
+    <div class="vp-buscar"><div id="vp-sel"></div><button type="button" class="btn sec" id="vp-cam" title="Leer el código con la cámara">📷 Cámara</button></div>
+    <div id="vp-camara"></div>
+    <div id="vp-res"><p class="nota">Escanea el código con el lector, escríbelo o busca por nombre.</p></div>
+  </div>`);
+  let cam = null;
+  const cerrarCam = () => { if (cam) { cam.detener(); cam = null; } $('#vp-camara', d).innerHTML = ''; };
+  const pintar = p => {
+    const res = $('#vp-res', d);
+    if (!p) { res.innerHTML = ''; return; }
+    const red = mapaRed();
+    const mio = miAlm ? red[miAlm + '|' + p.id] || 0 : null;
+    const total = almacenesActivos().reduce((s2, a) => s2 + (red[a.id + '|' + p.id] || 0), 0);
+    const may = Number(p.precio_mayoreo) > 0 && Number(p.precio_mayoreo) < Number(p.precio_menudeo);
+    res.innerHTML = `<div class="vp-prod">${p.imagen ? `<img data-img="${esc(p.imagen)}" alt="">` : ''}
+      <div><h3>${esc(p.nombre)}</h3><p class="precio-grande">${dinero(p.precio_menudeo)}</p>
+        ${may ? `<p>Mayoreo: <b>${dinero(p.precio_mayoreo)}</b></p>` : ''}
+        ${verCosto && p.costo !== undefined ? `<p class="nota">Costo: ${dinero(p.costo)}${Number(p.precio_menudeo) > 0 ? ` · margen ${Math.round((1 - Number(p.costo) / Number(p.precio_menudeo)) * 100)}%` : ''}</p>` : ''}
+        <p>${mio !== null ? `Aquí: <b>${numero(mio)}</b> ${esc(p.unidad || '')} · ` : ''}En todas: <b>${numero(total)}</b></p>
+        <small>${esc(p.codigo || '')}${p.codigo_barras ? ' · ' + esc(p.codigo_barras) : ''}</small></div></div>
+      <div class="pie"><button type="button" class="btn sec" id="vp-donde">¿Dónde hay?</button><button type="button" class="btn" data-cerrar>Listo</button></div>`;
+    cargarImgs(res);
+    $('#vp-donde', res).onclick = () => { cerrarCam(); dlgDondeHay(p); };
+  };
+  const sel = selectorProducto($('#vp-sel', d), p => { cerrarCam(); if (p) { pintar(p); sel.buscarOtro(); } });
+  $('#vp-cam', d).onclick = async () => {
+    if (cam) { cerrarCam(); return; }
+    cam = await abrirCamara($('#vp-camara', d), { alLeer: cod => {
+      cerrarCam();
+      const p = buscarPorCodigo(cod);
+      if (p) sel.elegir(p);
+      else $('#vp-res', d).innerHTML = `<p class="txt-error">El código ${esc(cod)} no está en el catálogo.</p>`;
+    } });
+  };
+  const vigilar = setInterval(() => { if (!d.open) { clearInterval(vigilar); cerrarCam(); } }, 500);
+  setTimeout(() => { const q = $('.sel-q', d); if (q) q.focus(); }, 50);
+}
+
 /* ---------------- Arranque ---------------- */
 async function iniciar() {
   document.title = CFG.NOMBRE;
@@ -7521,7 +7626,25 @@ async function iniciar() {
   $('#login-pedir').addEventListener('click', () => abrirPublico('pedir'));
   $('#login-registro').addEventListener('click', () => abrirPublico('registro'));
   $('#login-pub').hidden = CFG.PORTAL_PUBLICO === false;
-  $('#menu').addEventListener('click', e => { const b = e.target.closest('[data-v]'); if (b) irA(b.dataset.v); });
+  $('#menu').addEventListener('click', e => {
+    const cab = e.target.closest('.menu-cab');
+    if (cab) {
+      const lista = cab.nextElementSibling, abrir = lista.hidden;
+      $$('#menu .menu-lista').forEach(x => { x.hidden = true; x.previousElementSibling.setAttribute('aria-expanded', 'false'); });
+      lista.hidden = !abrir; cab.setAttribute('aria-expanded', String(abrir));
+      return;
+    }
+    const b = e.target.closest('[data-v]');
+    if (!b) return;
+    if (b.dataset.tab && typeof VT !== 'undefined') VT.pestana = b.dataset.tab;
+    irA(b.dataset.v);
+  });
+  document.addEventListener('click', e => { if (!e.target.closest('#menu')) $$('#menu .menu-lista').forEach(x => { x.hidden = true; }); });
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') $$('#menu .menu-lista').forEach(x => { x.hidden = true; });
+    if (e.key === 'F2' && S.usuario && burbujaPrecioVisible()) { e.preventDefault(); abrirVerificarPrecio(); }
+  });
+  iniciarBurbujaPrecio();
   $('#estado').addEventListener('click', () => sincronizar(true));
   $('#dlg').addEventListener('click', e => { if (e.target.closest('[data-cerrar]')) cerrarModal(); });
 
