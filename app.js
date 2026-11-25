@@ -5,7 +5,7 @@
 
 const CFG = Object.assign({ NOMBRE: 'Control de Inventario', SYNC_MINUTOS: 15, API_URL: '' }, window.APP_CONFIG || {});
 CFG.NOMBRE_ORIGINAL = CFG.NOMBRE;
-const VERSION_APP = '5.7.5';
+const VERSION_APP = '5.7.6';
 
 const ROL_TXT = {
   ADMIN_GENERAL: 'Administrador general',
@@ -7679,7 +7679,16 @@ async function iniciar() {
   $('#app-nombre').textContent = CFG.NOMBRE;
 
   if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
-    navigator.serviceWorker.register('sw.js').catch(() => {});
+    // updateViaCache: 'none' revisa sw.js en el servidor cada vez; al llegar una versión nueva, se avisa y se recarga sola
+    navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then(reg => reg.update()).catch(() => {});
+    const habiaControl = !!navigator.serviceWorker.controller;
+    let recargando = false;
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (!habiaControl || recargando) return;
+      recargando = true;
+      toast('Hay una versión nueva de la app. Actualizando…', 'ok');
+      setTimeout(() => location.reload(), 1200);
+    });
   }
   try {
     await DB.abrir();
